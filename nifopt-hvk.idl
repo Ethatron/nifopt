@@ -1,0 +1,161 @@
+[
+    uuid(79eb9777-29c9-427f-8f2a-ac64f7a6bf5a),
+    version(1.0)
+]
+interface havok
+{
+    typedef	unsigned char	bool;
+    typedef	unsigned char	hvkByte;
+    typedef	unsigned short	hvkShort;
+
+    typedef	unsigned short	hvkTriangle[3];
+    typedef	float		hvkPoint3[3];
+    typedef	float		hvkPoint4[4];
+    typedef	float		hvkMatrix43[4*3];
+    typedef	float		hvkMatrix44[4*4];
+
+//  int GenerateMoppCode(int nVerts, const hvkPoint3 *verts, int nTris, const hvkTriangle *tris);
+    int GenerateMoppCode(
+	[in] hvkByte material,
+	[in] int nVerts,
+	[in, ref, size_is(nVerts)] const hvkPoint3 *verts,
+	[in] int nTris,
+	[in, ref, size_is(nTris)] const hvkTriangle *tris
+    );
+
+//  int GenerateMoppCodeWithSubshapes(int nShapes, const int *shapeVerts, int nVerts, const hvkPoint3 *verts, int nTris, const hvkTriangle *tris);
+    int GenerateMoppCodeWithSubshapes(
+	[in] int nShapes,
+	[in, ref, size_is(nShapes)] const int *shapeVerts,
+	[in] int nMaterials,
+	[in, ref, size_is(nMaterials)] const hvkByte *materialIDs,
+	[in] int nVerts,
+	[in, ref, size_is(nVerts)] const hvkPoint3 *verts,
+	[in] int nTris,
+	[in, ref, size_is(nTris)] const hvkTriangle *tris
+    );
+
+//  int RetrieveMoppCode(int nBuffer, hkUint8 *buffer);
+    int RetrieveMoppCode(
+	[in] int nBuffer,
+	[out, ref, size_is(nBuffer)] hvkByte *buffer
+    );
+//  int RetrieveMoppWelding(int nBuffer, hkUint16 *buffer);
+    int RetrieveMoppWelding(
+	[in] int nBuffer,
+	[out, ref, size_is(nBuffer)] hvkShort *buffer
+    );
+    int RetrieveMoppScale(
+	[out] float *value
+    );
+    int RetrieveMoppOrigin(
+	[out] float *value
+    );
+
+//  void CalcOBBPolyhedron(int nVerts, const hvkPoint3 *verts, int nTris, const hvkTriangle *tris, float factor, float tolerance, hvkMatrix44 *boxtransform, bool *identity, hvkPoint3 *boxhalfextents, bool *exclusive);
+    void CalcOBBPolyhedron(
+	[in] int nVerts,
+	[in, ref, size_is(nVerts)] const hvkPoint3 *verts,
+	[in] int nTris,
+	[in, ref, size_is(nTris)] const hvkTriangle *tris,
+	[in] float factor,
+	[in] float tolerance,
+	[out, ref] hvkMatrix44 *boxtransform,
+	[out, ref] bool *identity,
+	[out, ref] hvkPoint3 *boxhalfextents,
+	[out, ref] bool *exclusive
+    );
+
+//  void CalcHullPolyhedron(int nVerts, const hvkPoint3 *verts, int nTris, const hvkTriangle *tris, float factor, float tolerance, int *nPlanes, hvkPoint4 *planes, bool *exclusive);
+    void CalcHullPolyhedron(
+	[in] int nVerts,
+	[in, ref, size_is(nVerts)] const hvkPoint3 *verts,
+	[in] int nTris,
+	[in, ref, size_is(nTris)] const hvkTriangle *tris,
+	[in] float factor,
+	[in] float tolerance,
+	[in, out, ref] int *nPlanes,
+	[out, ref, size_is(nTris)] hvkPoint4 *planes,
+	[out, ref] bool *exclusive
+    );
+
+//  void CalcMassPropertiesSphere(float radius, float density, bool solid, float& mass, float& volume, hvkPoint3& center, hvkMatrix43 &inertia);
+    void CalcMassPropertiesSphere(
+	[in] float radius,
+	[in] float density,
+	[in] bool solid,
+	[out, ref] float *mass,
+	[out, ref] float *volume,
+	[out, ref] hvkPoint3 *center,
+	[out, ref] hvkMatrix43 *inertia
+    );
+
+//  void CalcMassPropertiesBox(hvkPoint3 size, float density, bool solid, float& mass, float& volume, hvkPoint3& center, hvkMatrix43 &inertia);
+    void CalcMassPropertiesBox(
+	[in, ref] const hvkPoint3 *size,
+	[in] float density,
+	[in] bool solid,
+	[out, ref] float *mass,
+	[out, ref] float *volume,
+	[out, ref] hvkPoint3 *center,
+	[out, ref] hvkMatrix43 *inertia
+    );
+
+//  void CalcMassPropertiesCylinder(hvkPoint3 startAxis, hvkPoint3 endAxis, float radius, float density, bool solid, float& mass, float& volume, hvkPoint3& center, hvkMatrix43 &inertia);
+    void CalcMassPropertiesCylinder(
+	[in, ref] const hvkPoint3 *startAxis,
+	[in, ref] const hvkPoint3 *endAxis,
+	[in] float radius,
+	[in] float density,
+	[in] bool solid,
+	[out, ref] float *mass,
+	[out, ref] float *volume,
+	[out, ref] hvkPoint3 *center,
+	[out, ref] hvkMatrix43 *inertia
+    );
+
+//  void CalcMassPropertiesCapsule(hvkPoint3 startAxis, hvkPoint3 endAxis, float radius, float density, bool solid, float& mass, float& volume, hvkPoint3& center, hvkMatrix43 &inertia);
+    void CalcMassPropertiesCapsule(
+	[in, ref] const hvkPoint3 *startAxis,
+	[in, ref] const hvkPoint3 *endAxis,
+	[in] float radius,
+	[in] float density,
+	[in] bool solid,
+	[out, ref] float *mass,
+	[out, ref] float *volume,
+	[out, ref] hvkPoint3 *center,
+	[out, ref] hvkMatrix43 *inertia
+    );
+
+//  void CalcMassPropertiesPolyhedron(int nVerts, const hvkPoint3 *verts, int nTris, const hvkTriangle *tris, float density, bool solid, float& mass, float& volume, hvkPoint3& center, hvkMatrix43 &inertia);
+    void CalcMassPropertiesPolyhedron(
+	[in] int nVerts,
+	[in, ref, size_is(nVerts)] const hvkPoint3 *verts,
+	[in] int nTris,
+	[in, ref, size_is(nTris)] const hvkTriangle *tris,
+	[in] float density,
+	[in] bool solid,
+	[out, ref] float *mass,
+	[out, ref] float *volume,
+	[out, ref] hvkPoint3 *center,
+	[out, ref] hvkMatrix43 *inertia
+    );
+
+//  void CombineMassProperties(int nItems, float* masses, float* volumes, hvkPoint3* centers, hvkMatrix43* inertias, hvkMatrix44* transforms, float& mass, float& volume, hvkPoint3& center, hvkMatrix43 &inertia);
+    void CombineMassProperties(
+	[in] int nItems,
+	[in, ref] const float *masses,
+	[in, ref] const float *volumes,
+	[in, ref] const hvkPoint3 *centers,
+	[in, ref] const hvkMatrix43 *inertias,
+	[in, ref] const hvkMatrix44 *transforms,
+	[out, ref] float *mass,
+	[out, ref] float *volume,
+	[out, ref] hvkPoint3 *center,
+	[out, ref] hvkMatrix43 *inertia
+    );
+
+    bool HavokInit(void);
+    void HavokCleanup(void);
+    void HavokShutdown(void);
+}

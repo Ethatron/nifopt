@@ -1,0 +1,7 @@
+//file: havok.acf
+[
+    implicit_handle (handle_t havok_IfHandle)
+]
+interface havok
+{
+}
