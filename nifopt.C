@@ -2169,6 +2169,19 @@ bool isequal(Quaternion a, Quaternion b) {
 	 (fabsf(a.w - b.w) < 1e-6);
 }
 
+/* linear interpolation:
+ *  intp = (kp->data *           wp   ) + (kn->data * (1.0 -    wp  ));
+ *  intp = (kp->data * (1.0 -    wn  )) + (kn->data *           wn   );
+ * these two are equivalent
+ *
+ * quadric interpolation:
+ *  intp = (kp->data *        wp * wp ) + (kn->data * (1.0 - wp * wp));
+ *  intp = (kp->data * (1.0 - wn * wn)) + (kn->data *        wn * wn );
+ * here the two forms are accelerating/deccalerating
+ *
+ * quadric bézier-curves:
+ */
+
 template<typename K>
 int optimize_keys(KeyType ip, vector< Key<K> > &keys, float round) {
   int kc = (int)keys.size();
@@ -2634,12 +2647,16 @@ string optimize_node(bhkNiTriStripsShapeRef node) {
 
 	memset(&tri, 0, sizeof(tri));
 
-	/* the original vertex indices
-	 * (for remapping skin weights)
+	/* the original vertex indices (for remapping skin weights)
 	 */
 	tri.p1.odx = (*itf).v1;
 	tri.p2.odx = (*itf).v2;
 	tri.p3.odx = (*itf).v3;
+
+	if (((int)tri.p1.odx > vc) ||
+	    ((int)tri.p2.odx > vc) ||
+	    ((int)tri.p3.odx > vc))
+	  throw runtime_error("Face-index out-of-bounds. Corrupt face, NifSkope will crash opening this file.");
 
 	/* --------------------------------------- */
 	tri.p1.x = v[(*itf).v1].x;
@@ -2822,6 +2839,11 @@ string optimize_node(bhkPackedNiTriStripsShapeRef node) {
       tri.p1.odx = (*itf).triangle.v1;
       tri.p2.odx = (*itf).triangle.v2;
       tri.p3.odx = (*itf).triangle.v3;
+
+      if (((int)tri.p1.odx > vc) ||
+	  ((int)tri.p2.odx > vc) ||
+	  ((int)tri.p3.odx > vc))
+	throw runtime_error("Face-index out-of-bounds. Corrupt face, NifSkope will crash opening this file.");
 
       /* sorting key */
       tri.p1.groupid = -1;
@@ -3340,12 +3362,17 @@ string optimize_node(NiTriShapeRef node) {
 
       memset(&tri, 0, sizeof(tri));
 
-      /* the original vertex indices
-       * (for remapping skin weights)
+      /* the original vertex indices (for remapping skin weights)
        */
       tri.p1.odx = (*itf).v1;
       tri.p2.odx = (*itf).v2;
       tri.p3.odx = (*itf).v3;
+
+      /* fe.: OWC - ND\Meshes\Furniture\UpperClass\UpperDoubleBed06.NIF */
+      if (((int)tri.p1.odx > vc) ||
+	  ((int)tri.p2.odx > vc) ||
+	  ((int)tri.p3.odx > vc))
+	throw runtime_error("Face-index out-of-bounds. Corrupt face, NifSkope will crash opening this file.");
 
       /* --------------------------------------- */
       tri.p1.x = v[(*itf).v1].x;
@@ -3667,6 +3694,8 @@ string optimize_node(NiTriShapeRef node) {
 	      }
 	      /* does not contain degenerate vertices */
 	      else if (md->GetVertexCount() == _v.size()) {
+		/* fe.: Oblivion WarCry\meshes\OE\Creatures\Skeleton Variants\Leoric Skull.nif */
+
 		/* old to new to opt */
 		int vc = (int)_v.size();
 		for (int vs = 0, vh = 0; vs < vc; vs++) {
@@ -4381,6 +4410,83 @@ void sanitize_node(NiAVObjectRef av, NiNodeRef nd, NiObjectRef ob) {
   }
 
   if (ob) {
+    {
+      bhkMoppBvTreeShapeRef bhk = DynamicCast<bhkMoppBvTreeShape>(ob);
+      bhkShapeRef shp = (bhk ? bhk->GetShape() : NULL);
+      bhkPackedNiTriStripsShapeRef pck = (shp ? DynamicCast<bhkPackedNiTriStripsShape>(shp) : NULL);
+      bhkNiTriStripsShapeRef tri = (shp ? DynamicCast<bhkNiTriStripsShape>(shp) : NULL);
+
+      if (bhk) {
+	HavokMaterial mat = bhk->GetMaterial();
+	bool broken = false;
+
+	if (pck) {
+	  vector<Niflib::OblivionSubShape> os;
+
+	  /* reverse direction: lowest material highest priority */
+	  os = pck->GetSubShapes();
+	  int ss = (int)os.size() - 1;
+	  while (ss >= 0) {
+	    /* broken material */
+	    if ((os[ss].material < HAV_MAT_STONE) ||
+	        (os[ss].material > HAV_MAT_ELEVATOR)) {
+	      os[ss].material = HAV_MAT_WOOD;
+	      broken = true;
+	    }
+
+	    mat = os[ss].material;
+	    ss--;
+	  }
+
+	  if (broken)
+	    pck->SetSubShapes(os);
+	}
+	else if (tri) {
+	  mat = tri->GetMaterial();
+
+	  /* broken material */
+	  if ((mat < HAV_MAT_STONE) || (mat > HAV_MAT_ELEVATOR)) {
+	    tri->SetMaterial(mat = HAV_MAT_WOOD);
+	    broken = true;
+	  }
+	}
+
+	{
+	  HavokMaterial bmt = bhk->GetMaterial();
+
+	  /* broken material */
+	  if ((bmt < HAV_MAT_STONE) || (bmt > HAV_MAT_ELEVATOR)) {
+	    if ((mat < HAV_MAT_STONE) || (mat > HAV_MAT_ELEVATOR))
+	      bhk->SetMaterial(bmt = HAV_MAT_WOOD);
+	    else
+	      bhk->SetMaterial(bmt = mat);
+
+	    if (verbose)
+	      addnote(" Invalid parent-material replaced by child-material.\n");
+	  }
+	}
+
+	if (verbose && broken)
+	  addnote(" Invalid material replaced by WOOD.\n");
+      }
+    }
+
+    {
+      bhkNiTriStripsShapeRef bhk = DynamicCast<bhkNiTriStripsShape>(ob);
+
+      if (bhk) {
+	HavokMaterial mat = bhk->GetMaterial();
+	/* broken material */
+	if ((mat < HAV_MAT_STONE) || (mat > HAV_MAT_ELEVATOR)) {
+	  /* fe.: Better Cities - Meshes\meshes\bettercitiesresources\3dmaps\hbcyrodiilframe01.nif */
+	  bhk->SetMaterial(HAV_MAT_WOOD);
+
+	  if (verbose)
+	    addnote(" Invalid material replaced by WOOD.\n");
+	}
+      }
+    }
+
     {
       NiMultiTargetTransformControllerRef ctrl = DynamicCast<NiMultiTargetTransformController>(ob);
 
