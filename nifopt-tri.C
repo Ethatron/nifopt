@@ -304,9 +304,12 @@ void ReadTri(const char *inname) {
        * is the number of modifier vertices, it's
        * just a concatenation of all modifier-vertices
        *
-       * the meaning of the modifier-groups is unknown
-       * on imperial faces it's 6, I suppose they relate
-       * to the sliders in the race-menu
+       * the meaning of the modifier-groups is written
+       * down in the name, normally those are Phonems
+       * (face-expressions for specific spoken louds)
+       *
+       * I assume they are also used to mix'n'match the
+       * face-sliders in the facegen
        */
       int mdatasize = 0;
       for (int m = 0; m < TriMorphHeader.NumModifiers; m++) {
