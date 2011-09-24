@@ -198,6 +198,7 @@ void catch_func(unsigned int u, EXCEPTION_POINTERS* pExp) {
 #include <Physics/Collide/Shape/Convex/ConvexTransform/hkpConvexTransformShape.h>
 #include <Physics/Collide/Shape/Compound/Collection/SimpleMesh/hkpSimpleMeshShape.h>
 #include <Physics/Collide/Shape/Compound/Collection/ExtendedMeshShape/hkpExtendedMeshShape.h>
+#include <Physics/Collide/Shape/Deprecated/Mesh/hkpMeshShape.h>
 #include <Physics/Collide/Shape/Compound/Collection/List/hkpListShape.h>
 #include <Physics/Collide/Shape/Compound/Collection/Mesh/hkpMeshMaterial.h>
 
@@ -1029,10 +1030,34 @@ void CombineMassProperties(int nItems,
 
 /* ---------------------------------------------------- */
 
-#define CONVEXSHAPERADIUS	0.1945f * 0.95f
-#define	BASEFACTOR		0.1945f * 1.35f
-#define	AATRFACTOR		0.1945f * 1.35f
-#define	INTLFACTOR		0.1945f
+#undef	BRUTEFORCE_MATCHHAVOK
+#ifdef	BRUTEFORCE_MATCHHAVOK
+unsigned short *global_owcode;
+int global_owlen;
+unsigned char *global_ocode;
+int global_olen;
+
+int sspbits_loop;
+float sradius_loop;
+float bradius_loop;
+float aradius_loop;
+float iradius_loop;
+hkUint8 material_loop;
+
+#define CONVEXSHAPEBITS		sspbits_loop
+#define CONVEXSHAPERADIUS	sradius_loop  //0.1945f * 0.95f
+#define	BASEFACTOR		bradius_loop  //0.1945f * 1.35f
+#define	AATRFACTOR		aradius_loop  //0.1945f * 1.35f
+#define	INTLFACTOR		iradius_loop  //0.1945f
+#define	MATERIALIDX		material_loop
+#else
+#define CONVEXSHAPEBITS		8
+#define CONVEXSHAPERADIUS	0.1000f
+#define	BASEFACTOR		0.3000f
+#define	AATRFACTOR		0.3000f
+#define	INTLFACTOR		0.5000f
+#define	MATERIALIDX		0 // material
+#endif
 
 static hkpSimpleMeshShape *ConstructHKMesh(hvkByte material,
 					   int nVerts, const hvkPoint3 *verts,
@@ -1062,7 +1087,7 @@ static hkpSimpleMeshShape *ConstructHKMesh(hvkByte material,
 		 * into the material-table
 		 */
 		triangles.pushBack(hktri);
-		materials.pushBack(0 /*material*/);
+		materials.pushBack(MATERIALIDX);
 	}
 
 	vertices.setSize(0);
@@ -1072,17 +1097,25 @@ static hkpSimpleMeshShape *ConstructHKMesh(hvkByte material,
 		vertices.pushBack(hkVector4(vert.x, vert.y, vert.z));
 	}
 
-	//storageMeshShape->setRadius(1.0f);
 	return storageMeshShape;
 }
 
-static hkpExtendedMeshShape *ConstructHKMesh(int nShapes, const int *shapes,
+#define hkpUtilizedMeshShape	hkpExtendedMeshShape
+#define UtilizedSubpart		TrianglesSubpart
+#define addSubpart_		addTrianglesSubpart
+#define m_numTriangles_		m_numTriangleShapes
+//#define hkpUtilizedMeshShape	hkpMeshShape
+//#define UtilizedSubpart		Subpart
+//#define addSubpart_		addSubpart
+//#define m_numTriangles_		m_numTriangles
+
+static hkpUtilizedMeshShape *ConstructHKMesh(int nShapes, const int *shapes,
 					     int nMaterials, const hvkByte *mats,
 					     int nVerts, const hvkPoint3 *verts,
 					     int nTris, const hvkTriangle *tris,
 					     int vertOffset = 0) {
 
-	hkpExtendedMeshShape *storageMeshShape = new hkpExtendedMeshShape(CONVEXSHAPERADIUS);
+	hkpUtilizedMeshShape *storageMeshShape = new hkpUtilizedMeshShape(CONVEXSHAPERADIUS, CONVEXSHAPEBITS);
 
 #if 0
 	/* the complete material table, we assume Oblivions materials
@@ -1101,11 +1134,16 @@ static hkpExtendedMeshShape *ConstructHKMesh(int nShapes, const int *shapes,
 	for (int s = 0; s < nShapes; ++s) {
 	  int endv = startv + (shapes[s] * 1);
 
-	  hkpExtendedMeshShape::TrianglesSubpart part;
+	  hkpUtilizedMeshShape::UtilizedSubpart part;
 
 	  /* it will not copy the data out, need to allocate things */
+#ifdef	LOCAL_SUBSHAPES
 	  part.m_numVertices = shapes[s];
 	  part.m_vertexBase = &verts[startv].x;
+#else
+	  part.m_numVertices = nVerts;
+	  part.m_vertexBase = &verts[0].x;
+#endif
 	  part.m_vertexStriding = sizeof(hvkPoint3);
 
 	  /* assume triangles are unordered, we pick them out one by one
@@ -1126,28 +1164,30 @@ static hkpExtendedMeshShape *ConstructHKMesh(int nShapes, const int *shapes,
 	      if (!nt++)
 		nb = t;
 
+#ifdef	LOCAL_SUBSHAPES
 	      assert((tris[t].a >= 0) && (tris[t].a < (endv - startv)));
 	      assert((tris[t].b >= 0) && (tris[t].b < (endv - startv)));
 	      assert((tris[t].c >= 0) && (tris[t].c < (endv - startv)));
+#endif
 	    }
 	  }
 
 	  /* it will not copy the data out, need to allocate things */
 //	  part.m_numTriangleShapes = (int)triangles.size();
-//	  part.m_indexBase = &triangles[0];
-	  part.m_numTriangleShapes = nt;
 	  part.m_indexBase = &tris[nb];
+	  part.m_numTriangles_ = nt;
+	  // using "0" is the only way to get the triangle-id into the sub-part
+	  part.m_triangleOffset = -1/*nb*/;
 	  part.m_indexStriding = sizeof(hvkTriangle);
-	  part.m_stridingType = hkpExtendedMeshShape::INDICES_INT16;
+	  part.m_stridingType = hkpUtilizedMeshShape::INDICES_INT16;
 
 	  /* the material-indices are only for querying and won't end
-	   * up in the MOPP-code: getShapeKey() returns shape-id and
-	   * triangle-id which in turn is used to lookup the triangle
-	   * which is used to lookup the material
+	   * up in the MOPP-code: getShapeKey() returns shape-id
+	   * which is used to lookup the material directly
 	   */
 	  part.m_materialIndexBase = &mats[nb];
 	  part.m_materialIndexStriding = sizeof(hvkByte);
-	  part.m_materialIndexStridingType = hkpExtendedMeshShape::MATERIAL_INDICES_INT8;
+	  part.m_materialIndexStridingType = hkpUtilizedMeshShape::MATERIAL_INDICES_INT8;
 
 #if 0
 	  /* this might not be necessary ... for the MOPP-code the
@@ -1160,12 +1200,11 @@ static hkpExtendedMeshShape *ConstructHKMesh(int nShapes, const int *shapes,
 //	  part.m_materialClass = ???;
 #endif
 
-	  storageMeshShape->addTrianglesSubpart(part);
+	  storageMeshShape->addSubpart_(part);
 
 	  startv = endv;
 	}
 
-	//storageMeshShape->setRadius(1.0f);
 	return storageMeshShape;
 }
 
@@ -1182,6 +1221,36 @@ float moppOrigin[3];
 static int InternalGenerateCode(hvkByte material,
 				int nVerts, const hvkPoint3 *verts,
 				int nTris, const hvkTriangle *tris) {
+#ifdef	BRUTEFORCE_MATCHHAVOK
+/*WELDING_TYPE_ANTICLOCKWISE = 0,
+  WELDING_TYPE_CLOCKWISE = 4,
+  WELDING_TYPE_TWO_SIDED = 5,
+  WELDING_TYPE_NONE = 6*/
+
+  vector<float> best_sradius_loop;
+  vector<float> best_bradius_loop;
+  vector<float> best_aradius_loop;
+  vector<float> best_iradius_loop;
+  vector<int>   best_material_loop;
+
+  int best_diff = global_olen;
+
+  sradius_loop = 0.1945f;
+  bradius_loop = 0.1945f;
+  aradius_loop = 0.1945f;
+  iradius_loop = 0.5f;
+
+  for (sradius_loop = 0.095f; sradius_loop <= 0.105f; sradius_loop += 0.00005f)
+  for (bradius_loop = 0.01f; bradius_loop <= 0.4f; bradius_loop += 0.001f)
+//for (aradius_loop = (bradius_loop - 0.01); aradius_loop <= (bradius_loop + 0.01); aradius_loop += 0.001f)
+//for (iradius_loop = 0.40f; iradius_loop <= 0.60f; iradius_loop += 0.05f)
+  for (material_loop = 0; material_loop <= material; material_loop += max(1, material)) {
+      aradius_loop = bradius_loop;
+
+    // edgeNormalSnapDeltaAngle & triangleNormalSnapDeltaAngle -> hkpWorld
+//  hkpWeldingUtility::initWeldingTable(15.1f, 15.1f);
+#endif
+
 	int retCode = 0;
         hkpMoppCode* k_phkpMoppCode = NULL;
 
@@ -1192,7 +1261,16 @@ static int InternalGenerateCode(hvkByte material,
 
 	mfr.setAbsoluteFitToleranceOfTriangles(BASEFACTOR * 1.0f);
 	mfr.setAbsoluteFitToleranceOfAxisAlignedTriangles(hkVector4(AATRFACTOR * 1.0f, AATRFACTOR * 1.0f, AATRFACTOR * 1.0f));
-	mfr.setAbsoluteFitToleranceOfInternalNodes(INTLFACTOR * 3.0f);
+//	mfr.setAbsoluteFitToleranceOfInternalNodes(INTLFACTOR * 3.0f);
+	mfr.setRelativeFitToleranceOfInternalNodes(INTLFACTOR * 1.0f);
+	mfr.m_useShapeKeys = false;		// much better
+	mfr.m_enablePrimitiveSplitting = false;
+	mfr.m_enableChunkSubdivision = false;	// confirmed
+	mfr.m_cachePrimitiveExtents = true;	// just faster
+//	m_enablePrimitiveSplitting
+//	m_enableChunkSubdivision
+//	m_enableInterleavedBuilding
+//	m_cachePrimitiveExtents
 
 	moppTris = 0;
 	moppSize = 0;
@@ -1226,6 +1304,67 @@ static int InternalGenerateCode(hvkByte material,
 
 	list->removeReference();
 
+#ifdef	BRUTEFORCE_MATCHHAVOK
+	fprintf(stderr, "%f %f %f %f %d: %d %d\r", sradius_loop, bradius_loop, aradius_loop, iradius_loop, material_loop, moppSize, moppTris);
+
+	/*if (moppSize == global_olen)*/ {
+	  int diffs = 0;
+	  for (int n = 0; n < moppSize; n++) {
+	    if (moppBuffer[n] != global_ocode[n])
+	      diffs++;
+	  }
+
+	  if (best_diff == diffs) {
+	    best_sradius_loop.push_back(sradius_loop);
+	    best_bradius_loop.push_back(bradius_loop);
+	    best_aradius_loop.push_back(aradius_loop);
+	    best_iradius_loop.push_back(iradius_loop);
+	    best_material_loop.push_back(material_loop);
+	    best_diff = diffs;
+	  }
+	  else if (best_diff > diffs) {
+	    fprintf(stderr, "new best %d:\n", best_diff);
+
+	    best_sradius_loop.clear();
+	    best_bradius_loop.clear();
+	    best_aradius_loop.clear();
+	    best_iradius_loop.clear();
+	    best_material_loop.clear();
+	    best_sradius_loop.push_back(sradius_loop);
+	    best_bradius_loop.push_back(bradius_loop);
+	    best_aradius_loop.push_back(aradius_loop);
+	    best_iradius_loop.push_back(iradius_loop);
+	    best_material_loop.push_back(material_loop);
+	    best_diff = diffs;
+
+	    fprintf(stdout, "MOPP-Code %d:\n", moppSize);
+	    for (int n = 0; n < moppSize; n++) {
+	      fprintf(stdout, " %02x ", moppBuffer[n]);
+	      if ((n & 15) == 15)
+		fprintf(stdout, "\n");
+	    }
+	    fprintf(stdout, "\n");
+	    fprintf(stdout, "Diffs: %d\n", diffs);
+
+	    fprintf(stdout, "Welding %d:\n", moppTris);
+	    for (int n = 0; n < moppTris; n++) {
+	      fprintf(stdout, " %04x ", moppWelding[n]);
+	      if ((n & 7) == 7)
+		fprintf(stdout, "\n");
+	    }
+	    fprintf(stdout, "\n");
+	  }
+	}
+  }
+
+  int candidates = (int)best_sradius_loop.size();
+  fprintf(stdout, "Best diff: %d different bytes\n", best_diff);
+  fprintf(stdout, "Candidates: %d combinations\n", candidates);
+  for (int n = 0; n < candidates; n++)
+    fprintf(stdout, "%f %f %f %f %d\n", best_sradius_loop[n], best_bradius_loop[n], best_aradius_loop[n], best_iradius_loop[n], best_material_loop[n]);
+  fprintf(stdout, "\n");
+#endif
+
 	return moppSize;
 }
 
@@ -1233,6 +1372,138 @@ static int InternalGenerateCodeWithSubshapes(int nShapes, const int *subShapes,
 					     int nMaterials, const hvkByte *materialIDs,
 					     int nVerts, const hvkPoint3 *verts,
 					     int nTris, const hvkTriangle *tris) {
+#ifdef	BRUTEFORCE_MATCHHAVOK
+/* Original:
+
+  File:
+    "Oblivion - Meshes\meshes\architecture\anvil\anvilstreetlamp01.nif"
+  MOPP-Code 436:
+    28  00  ff  27  00  29  25  42  40  00  12  00  00  27  08  21
+    26  10  5b  0b  01  00  00  08  23  2c  17  00  91  00  f3  01
+			^^  ^^  ^^ triangle offset 24bit
+		    ^^  subpart num 8bit
+    00  00  00  26  00  57  12  57  53  3f  17  2d  27  1c  18  81
+    7e  0c  26  00  0b  13  30  27  01  31  27  07  51  30  27  00
+    0b  16  81  7a  04  26  00  4f  36  37  15  31  2a  04  27  46
+    51  33  26  08  57  18  84  81  04  27  46  51  32  26  4c  57
+    14  81  77  04  27  00  4a  34  35  27  07  4a  26  08  4f  0b
+    01  00  00  26  17  2c  27  1c  18  82  7e  0c  26  08  23  14
+    5b  56  04  27  07  33  31  30  27  07  21  15  53  50  01  36
+    26  20  4f  37  18  84  80  0c  27  30  4a  16  5b  58  04  26
+    08  37  33  32  26  33  4f  13  52  4d  01  34  27  1d  4a  35
+    27  0e  1a  10  1c  17  3b  09  16  11  1a  16  2f  18  81  7f
+    14  26  10  1a  10  13  11  06  11  1a  10  01  30  31  28  fc
+    ff  27  10  19  40  27  0e  19  11  12  10  09  12  ff  40  01
+    36  26  10  1a  37  28  fc  ff  26  11  1a  41  10  1c  11  01
+    32  33  12  ff  b8  0c  26  18  1c  17  19  14  04  27  0e  19
+    4b  4a  03  17  11  b8  28  03  1a  27  04  33  17  59  17  01
+    34  35  01  17  08  b4  16  8e  89  36  28  08  6d  27  13  1f
+    11  1f  1c  26  16  8e  7a  11  15  79  35  04  27  13  16  36
+    28  69  6d  10  87  00  01  30  31  1a  66  63  04  27  13  16
+    37  26  26  87  10  87  26  01  32  33  16  8e  7a  01  39  38
+    28  00  4d  26  4c  80  18  a8  a3  2d  11  32  1d  23  16  a7
+    a4  1b  01  4c  01  00  26  00  42  10  2c  25  09  17  33  25
+    01  3b  27  23  61  3a  28  93  9a  27  23  3e  42  28  00  03
+    45  10  80  5e  01  3d  3c  10  80  69  20  14  82  7f  18  01
+    4c  01  00  27  01  3e  11  2a  23  06  10  42  00  01  40  41
+    28  93  9a  26  25  42  43  28  00  03  44  17  46  3f  04  27
+    01  20  3e  3f
+  Welding 48:
+    0128  bd6e  3f7c  bf15  be59  bf79  bd74  be66
+    bf40  3f65  3d6e  3f7c  bf15  3e59  3f48  bd02
+    be4c  bf40  3ef3  3e16  3f7c  bdae  3f09  3f48
+    bd23  3d80  bf79  bde9  bf70  3f7c  3cf2  3f1c
+    3f48  3ddd  3d27  bf7f  bf00  bf1c  be9a  3e05
+    3de0  3f48  3ef3  00d9  bf7f  0000  3f7f  a3f6
+*/
+
+/* Best match:
+
+#define CONVEXSHAPEBITS		8
+#define CONVEXSHAPERADIUS	0.0820f
+#define	BASEFACTOR		0.2000f
+#define	AATRFACTOR		0.2000f
+#define	INTLFACTOR		0.2000f
+
+  File:
+    "Oblivion - Meshes\meshes\architecture\anvil\anvilstreetlamp01.nif"
+  MOPP-Code 436:
+   28  00  ff  27  00  29  25  42  40  00  12  00  00  27  08  21
+   26  10  5b  0b  01  00  00  00  23  2c  17  00  91  00  f0  01
+		       ^^  ^^  ^^ triangle offset 24bit
+		   ^^  subpart num 8bit
+   00  00  00  26  00  57  12  57  54  3f  17  2c  27  1c  18  81
+   7e  0c  26  00  0b  13  30  27  01  31  27  07  51  30  27  00
+   0a  16  81  7a  04  26  00  4f  36  37  15  30  2a  04  27  46
+   51  33  26  08  57  18  84  81  04  27  46  51  32  26  4c  57
+   14  81  78  04  27  00  49  34  35  27  07  49  26  08  4f  0b
+   01  00  00  1e  17  2c  27  1c  18  82  7f  0c  26  08  23  14
+   5b  56  04  27  07  33  31  30  27  07  21  15  53  50  01  36
+   26  20  4f  37  18  83  80  0c  27  30  49  16  5b  58  04  26
+   08  36  33  32  26  33  4f  13  52  4d  01  34  27  1e  49  35
+   27  0f  1a  10  1b  17  38  09  16  18  81  7f  1e  10  13  10
+   06  11  1a  10  01  30  31  27  10  1a  11  18  16  07  28  fc
+   ff  26  11  1a  40  10  1b  11  01  32  33  27  0f  18  11  12
+   10  06  10  1a  10  01  37  36  28  fc  ff  26  11  1a  41  12
+   ff  b8  0c  26  18  1b  17  19  14  04  27  0f  18  4b  4a  03
+   17  11  b8  28  05  19  27  04  32  13  1f  0b  01  34  35  01
+   17  08  b4  16  8e  89  39  28  09  6d  27  13  1f  11  1f  1c
+   29  16  8e  7a  11  15  79  35  04  27  13  16  36  28  69  6d
+   10  87  00  01  30  31  1a  66  63  04  27  13  16  37  28  0c
+   6d  26  26  87  10  87  26  01  32  33  16  8e  7a  01  39  38
+   28  00  4d  26  4c  80  18  a8  a4  2d  11  31  1d  23  16  a7
+   a4  1b  01  4c  01  00  26  00  41  10  2b  26  09  17  32  25
+   01  3b  27  24  60  3a  28  94  9a  27  24  3d  42  28  00  03
+   45  10  80  5f  01  3d  3c  10  80  6a  20  14  81  7f  18  01
+   4c  01  00  27  01  3d  11  29  24  06  10  41  00  01  40  41
+   28  94  9a  26  26  41  43  28  00  03  44  17  46  3f  04  27
+   01  20  3e  3f
+  Welding 48:
+   41f6  010f  41f6  010f  41f6  010f  41f6  010f
+   59fa  200f  59f2  208f  59e0  218f  59e0  210f
+   59f6  010f  55f6  1d0f  55f6  1d0f  55f6  1d0f
+   55f6  1d0f  55f5  252f  5df7  1cef  35f6  210f
+   35f6  210f  35f6  210f  35f6  210f  55f0  262f
+   55f0  262f  55f0  262f  55f0  262f  59f6  210f
+*/
+
+/*WELDING_TYPE_ANTICLOCKWISE = 0,
+  WELDING_TYPE_CLOCKWISE = 4,
+  WELDING_TYPE_TWO_SIDED = 5,
+  WELDING_TYPE_NONE = 6*/
+
+  vector<int>   best_sspbits_loop;
+  vector<float> best_sradius_loop;
+  vector<float> best_bradius_loop;
+  vector<float> best_aradius_loop;
+  vector<float> best_iradius_loop;
+  vector<int>   best_material_loop;
+
+  int best_diff = global_olen;
+  int best_num = 0;
+
+  sspbits_loop = 8;
+  sradius_loop = 0.1945f;
+  bradius_loop = 0.1945f;
+  aradius_loop = 0.1945f;
+  iradius_loop = 0.5f;
+
+  int lg2 = 3;
+  while (nShapes > (1 << lg2))
+    lg2++;
+
+//for (sspbits_loop = 4; sspbits_loop <= 16; sspbits_loop *= 2)
+  for (sradius_loop = 0.095f; sradius_loop <= 0.105f; sradius_loop += 0.00005f)
+  for (bradius_loop = 0.01f; bradius_loop <= 0.4f; bradius_loop += 0.001f)
+//for (aradius_loop = (bradius_loop - 0.01); aradius_loop <= (bradius_loop + 0.01); aradius_loop += 0.001f)
+//for (iradius_loop = 0.10f; iradius_loop <= 1.00f; iradius_loop += 0.10f)
+/*for (material_loop = 0; material_loop <= material; material_loop += max(1, material))*/ {
+      aradius_loop = bradius_loop;
+
+    // edgeNormalSnapDeltaAngle & triangleNormalSnapDeltaAngle -> hkpWorld
+//  hkpWeldingUtility::initWeldingTable(15.1f, 15.1f);
+#endif
+
 	int retCode = 0;
 	hkpMoppCode* k_phkpMoppCode = NULL;
 
@@ -1253,10 +1524,21 @@ static int InternalGenerateCodeWithSubshapes(int nShapes, const int *subShapes,
 	      assert((tris[t].b >= startv) && (tris[t].b < endv));
 	      assert((tris[t].c >= startv) && (tris[t].c < endv));
 
+	      /* material-index is completely irrelevant
+	       * Oblivion does SubShapes[GetSubpart()].material
+	       */
 	      matls[t] = s;
-	      trils[t].a = tris[t].a - startv;
-	      trils[t].b = tris[t].b - startv;
-	      trils[t].c = tris[t].c - startv;
+
+	      /* we can do them local or global, isn't really any different */
+#ifdef	LOCAL_SUBSHAPES
+	      trils[t].a = tris[t].a   - startv  ;
+	      trils[t].b = tris[t].b   - startv  ;
+	      trils[t].c = tris[t].c   - startv  ;
+#else
+	      trils[t].a = tris[t].a /*- startv*/;
+	      trils[t].b = tris[t].b /*- startv*/;
+	      trils[t].c = tris[t].c /*- startv*/;
+#endif
 	    }
 	  }
 
@@ -1268,15 +1550,22 @@ static int InternalGenerateCodeWithSubshapes(int nShapes, const int *subShapes,
 	 * hkpExtendedMeshShape
 	 */
 //	hkpMeshShape* list = ConstructHKMesh(nShapes, subShapes, nMaterials, lmats, nVerts, verts, nTris, ltris);
-	hkpExtendedMeshShape* list = ConstructHKMesh(nShapes, subShapes, nMaterials, lmats, nVerts, verts, nTris, ltris);
-
-	list->setRadius(0.1000f);
+	hkpUtilizedMeshShape* list = ConstructHKMesh(nShapes, subShapes, nMaterials, lmats, nVerts, verts, nTris, ltris);
 
 	hkpMoppCompilerInput mfr;
 
 	mfr.setAbsoluteFitToleranceOfTriangles(BASEFACTOR * 1.0f);
 	mfr.setAbsoluteFitToleranceOfAxisAlignedTriangles(hkVector4(AATRFACTOR * 1.0f, AATRFACTOR * 1.0f, AATRFACTOR * 1.0f));
-	mfr.setAbsoluteFitToleranceOfInternalNodes(INTLFACTOR * 3.0f);
+//	mfr.setAbsoluteFitToleranceOfInternalNodes(INTLFACTOR * 3.0f);
+	mfr.setRelativeFitToleranceOfInternalNodes(INTLFACTOR * 1.0f);
+	mfr.m_useShapeKeys = false;		// much better
+	mfr.m_enablePrimitiveSplitting = false;
+	mfr.m_enableChunkSubdivision = false;	// confirmed
+	mfr.m_cachePrimitiveExtents = true;	// just faster
+//	m_enablePrimitiveSplitting
+//	m_enableChunkSubdivision
+//	m_enableInterleavedBuilding
+//	m_cachePrimitiveExtents
 
 	moppTris = 0;
 	moppSize = 0;
@@ -1308,6 +1597,81 @@ static int InternalGenerateCodeWithSubshapes(int nShapes, const int *subShapes,
 	}
 
 	list->removeReference();
+
+#ifdef	BRUTEFORCE_MATCHHAVOK
+	fprintf(stderr, "%d: %f %f %f %f %d: %d %d\r", sspbits_loop, sradius_loop, bradius_loop, aradius_loop, iradius_loop, material_loop, moppSize, moppTris);
+
+	int num = 0;
+	for (num = 0; num < moppSize; num++) {
+	  if (moppBuffer[num] != global_ocode[num])
+	    break;
+	}
+
+	if (best_num < num) {
+	  best_num = num;
+	}
+
+	/*if (moppSize == global_olen)*/ {
+	  int diffs = 0;
+	  for (int n = 0; n < moppSize; n++) {
+	    if (moppBuffer[n] != global_ocode[n])
+	      diffs++;
+	  }
+
+	  if (best_diff == diffs) {
+	    best_sspbits_loop.push_back(sspbits_loop);
+	    best_sradius_loop.push_back(sradius_loop);
+	    best_bradius_loop.push_back(bradius_loop);
+	    best_aradius_loop.push_back(aradius_loop);
+	    best_iradius_loop.push_back(iradius_loop);
+	    best_material_loop.push_back(material_loop);
+	    best_diff = diffs;
+	  }
+	  else if (best_diff > diffs) {
+	    fprintf(stderr, "new best %d:\n", best_diff);
+
+	    best_sspbits_loop.clear();
+	    best_sradius_loop.clear();
+	    best_bradius_loop.clear();
+	    best_aradius_loop.clear();
+	    best_iradius_loop.clear();
+	    best_material_loop.clear();
+	    best_sspbits_loop.push_back(sspbits_loop);
+	    best_sradius_loop.push_back(sradius_loop);
+	    best_bradius_loop.push_back(bradius_loop);
+	    best_aradius_loop.push_back(aradius_loop);
+	    best_iradius_loop.push_back(iradius_loop);
+	    best_material_loop.push_back(material_loop);
+	    best_diff = diffs;
+
+	    fprintf(stdout, "MOPP-Code %d:\n", moppSize);
+	    for (int n = 0; n < moppSize; n++) {
+	      fprintf(stdout, " %02x ", moppBuffer[n]);
+	      if ((n & 15) == 15)
+		fprintf(stdout, "\n");
+	    }
+	    fprintf(stdout, "\n");
+	    fprintf(stdout, "Diffs: %d\n", diffs);
+
+	    fprintf(stdout, "Welding %d:\n", moppTris);
+	    for (int n = 0; n < moppTris; n++) {
+	      fprintf(stdout, " %04x ", moppWelding[n]);
+	      if ((n & 7) == 7)
+		fprintf(stdout, "\n");
+	    }
+	    fprintf(stdout, "\n");
+	  }
+	}
+  }
+
+  int candidates = (int)best_sradius_loop.size();
+  fprintf(stdout, "Best len: %d bytes\n", best_num);
+  fprintf(stdout, "Best diff: %d different bytes\n", best_diff);
+  fprintf(stdout, "Candidates: %d combinations\n", candidates);
+  for (int n = 0; n < candidates; n++)
+    fprintf(stdout, "%d: %f %f %f %f %d\n", best_sspbits_loop[n], best_sradius_loop[n], best_bradius_loop[n], best_aradius_loop[n], best_iradius_loop[n], best_material_loop[n]);
+  fprintf(stdout, "\n");
+#endif
 
 	return moppSize;
 }
