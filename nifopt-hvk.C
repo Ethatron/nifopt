@@ -279,8 +279,24 @@ void CalcOBBPolyhedron(int nVerts, const hvkPoint3 *verts,
       bool boxb[8+1] = {false};
       hkVector4 boxv[8+3];
 
-      sv.m_vertices = reinterpret_cast<const float *>(&verts[0]);
-      sv.m_numVertices = nVerts;
+      vector<hvkPoint3> boxverts;
+      vector<bool> inu(nVerts);
+
+      for (int ts = 0; ts < nTris; ts++) {
+	/* degenerate handling */
+	inu[tris[ts].a] =
+	inu[tris[ts].b] =
+	inu[tris[ts].c] = true;
+      }
+
+      for (int vs = 0; vs < nVerts; vs++) {
+	/* degenerate handling */
+	if (inu[vs])
+	  boxverts.push_back(verts[vs]);
+      }
+
+      sv.m_vertices = reinterpret_cast<const float *>(&boxverts[0]);
+      sv.m_numVertices = (int)boxverts.size();
       sv.m_striding = sizeof(hvkPoint3);
 
       try {
@@ -362,6 +378,11 @@ void CalcOBBPolyhedron(int nVerts, const hvkPoint3 *verts,
       for (int vs = 0; vs < nVerts; vs++) {
 	hvkPoint3 vec = verts[vs];
 	hkVector4 hvkv(vec.x, vec.y, vec.z, 0.0f), hvka;
+
+	/* degenerate handling */
+	if (!inu[vs])
+	  continue;
+
 	bool boxm = false;
 
 	/* local coordinates */
@@ -462,13 +483,19 @@ void CalcHullPolyhedron(int nVerts, const hvkPoint3 *verts,
       };
 
       const hkVector4 eps(1e-6f, 1e-6f, 1e-6f, 1e-6f);
-      std::set<hkVector4e> planeEquationsRaw;
-      std::set<hkVector4e>::iterator per;
+      set<hkVector4e> planeEquationsRaw;
+      set<hkVector4e>::iterator per;
+      vector<bool> inu(nVerts);
 
       for (int ts = 0; ts < nTris; ts++) {
 	const hvkPoint3 *anchor  = verts + tris[ts].a;
 	const hvkPoint3 *target1 = verts + tris[ts].b;
 	const hvkPoint3 *target2 = verts + tris[ts].c;
+
+	/* degenerate handling */
+	inu[tris[ts].a] =
+	inu[tris[ts].b] =
+	inu[tris[ts].c] = true;
 
 	/* degenerate handling */
 	if ((anchor->x == target1->x) &&
@@ -533,6 +560,10 @@ void CalcHullPolyhedron(int nVerts, const hvkPoint3 *verts,
 	hvkPoint3 vec = verts[vs];
 	hkVector4 hvkv(vec.x, vec.y, vec.z, 0.0f);
 
+	/* degenerate handling */
+	if (!inu[vs])
+	  continue;
+
 	bool onp = false,
 	     ins = false,
 	     ous = false;
@@ -595,8 +626,8 @@ void CalcHullPolyhedron(int nVerts, const hvkPoint3 *verts,
 	  }
 	};
 
-	std::set<struct Edge> edges;
-	std::set<struct Edge>::iterator etr;
+	set<struct Edge> edges;
+	set<struct Edge>::iterator etr;
 
 	for (int ts = 0; ts < nTris; ts++) {
 	  const hvkPoint3 *p1 = verts + tris[ts].a;
@@ -625,9 +656,9 @@ void CalcHullPolyhedron(int nVerts, const hvkPoint3 *verts,
 	  if (memcmp(&e3.p1, &e3.p2, sizeof(hvkPoint3)) < 0) e3.p1 = *p1, e3.p2 = *p3;
 
 	  /* register and get reference */
-	  std::set<struct Edge>::iterator i1;
-	  std::set<struct Edge>::iterator i2;
-	  std::set<struct Edge>::iterator i3;
+	  set<struct Edge>::iterator i1;
+	  set<struct Edge>::iterator i2;
+	  set<struct Edge>::iterator i3;
 
 	  edges.insert(e1); i1 = edges.find(e1); i1->n++;
 	  edges.insert(e2); i2 = edges.find(e2); i2->n++;
@@ -649,6 +680,9 @@ void CalcHullPolyhedron(int nVerts, const hvkPoint3 *verts,
 	  if (!e.f || !e.b)
 	    uns++;
 	}
+
+	if (uns && verbose)
+	  addnote(" Open convex shape, see if you can close it for better performance.\n");
       }
 
       try {

@@ -966,6 +966,20 @@ const char *KeyName[] = {
   ""
 };
 
+/*! The motion system. */
+const char *MotionName[] = {
+  /*MO_SYS_INVALID = 0		*/ "Invalid",
+  /*MO_SYS_DYNAMIC = 1		*/ "Dynamic",
+  /*MO_SYS_SPHERE = 2		*/ "Sphere",
+  /*MO_SYS_SPHERE_INERTIA = 3	*/ "Sphere Inertia",
+  /*MO_SYS_BOX = 4		*/ "Box",
+  /*MO_SYS_BOX_STABILIZED = 5	*/ "Box Inertia",
+  /*MO_SYS_KEYFRAMED = 6	*/ "Box Inertia",
+  /*MO_SYS_FIXED = 7		*/ "Fixed",
+  /*MO_SYS_THIN_BOX = 8		*/ "Thin Box",
+  /*MO_SYS_CHARACTER = 9	*/ "Character"
+};
+
 /*! A material, used by havok shape objects. */
 const char *MaterialName[] = {
   /*HAV_MAT_STONE = 0		*/ "Stone",
@@ -1084,7 +1098,9 @@ string find_controller(NiInterpolatorRef interp) {
 
 	      if (frg != "") {
 		all += " ";
+		all += "\"";
 		all += frg;
+		all += "\"";
 	      }
 	    }
 
@@ -1145,6 +1161,20 @@ void substitute_refs(NiObjectRef newref, NiObjectRef oldref) {
       NiMultiTargetTransformControllerRef ctrl = DynamicCast<NiMultiTargetTransformController>(*walk);
       if (ctrl) {
 	ctrl->ReplaceExtraTarget(newav, oldav);
+	continue;
+      }
+    }
+  }
+
+  /* substitute Shape-references */
+  NiSkinInstanceRef newsi = DynamicCast<NiSkinInstance>(newref);
+  NiSkinInstanceRef oldsi = DynamicCast<NiSkinInstance>(oldref);
+  if (newsi && oldsi) {
+    for (walk = masterlist.begin(); walk != masterlist.end(); walk++) {
+      NiGeometryRef geo = DynamicCast<NiGeometry>(*walk);
+      if (geo) {
+	if (geo->GetSkinInstance() == oldsi)
+	  geo->SetSkinInstance(newsi);
 	continue;
       }
     }
@@ -1230,8 +1260,8 @@ bool nodemopped = false;
 
 string convert_node(bhkNiTriStripsShapeRef node, NiNodeRef parent, NiObjectRef &subst) {
 #define TRISTRIPSSHAPE_FACTOR	7.0f
-#define BOXSHAPE_TOLERANCE	0.05f
-#define HULLSHAPE_TOLERANCE	0.05f
+#define BOXSHAPE_TOLERANCE	0.20f	// must be way up sadly, was 0.05f
+#define HULLSHAPE_TOLERANCE	0.20f	// must be way up sadly, was 0.05f
   int sd = node->GetNumStripsData();
   /* no need for collision-node */
   if (!sd)
@@ -1494,9 +1524,9 @@ string convert_node(bhkNiTriStripsShapeRef node, NiNodeRef parent, NiObjectRef &
      * we don't need to know this wasn't a MOPP in the first
      * place ...
      */
-    if (!nodemopped &&
-	(nodemotion == MO_SYS_FIXED) &&
-        (nodelayer  != OL_CLUTTER)) {  // still applies?
+    if (!nodemopped)
+    if (((nodemotion == MO_SYS_FIXED    ) && (nodelayer != OL_CLUTTER    )) ||
+	((nodemotion == MO_SYS_KEYFRAMED) && (nodelayer == OL_ANIM_STATIC))) {  // still applies?
       bhkMoppBvTreeShapeRef nnode = new bhkMoppBvTreeShape;
       bhkPackedNiTriStripsShapeRef pnode = new bhkPackedNiTriStripsShape;
       hkPackedNiTriStripsDataRef pdata = new hkPackedNiTriStripsData;
@@ -1776,7 +1806,7 @@ string convert_node(bhkPackedNiTriStripsShapeRef node, NiNodeRef parent, NiObjec
 }
 
 string convert_node(bhkMoppBvTreeShapeRef node, NiNodeRef parent, NiObjectRef &subst) {
-  assert(nodemotion == MO_SYS_FIXED);
+  assert((nodemotion == MO_SYS_FIXED) || (nodemotion == MO_SYS_KEYFRAMED));
   nodemopped = true;
 
   /* check supported version-number */
@@ -1911,7 +1941,7 @@ string convert_node(NiTriStripsRef node, NiNodeRef parent, NiObjectRef &subst) {
     ndata->SetUVSet(uvs, data->GetUVSet(uvs));
 
   /* inaccessible map<>, we can rev-eng. it this way: */
-  std::map<int, int> im; int mp, cn = 0;
+  map<int, int> im; int mp, cn = 0;
   while ((mp = data->GetUVSetIndex(cn)) != -1)
     im[cn] = mp;
   ndata->SetUVSetMap(im);
@@ -2027,15 +2057,16 @@ string convert_node(NiTriStripsRef node, NiNodeRef parent, NiObjectRef &subst) {
 	}
       }
 
-      nskn->SetSkinPartition(nprt);
-
       /* prevent double deallocation */
+      nskn->SetSkinPartition(nprt);
       skn->SetSkinPartition(NULL);
     }
 
     /* prevent double deallocation */
     skn->SetSkinData(NULL);
-    skn->SetSkinPartition(NULL);
+
+    /* replace references everywhere */
+    substitute_refs(DynamicCast<NiObject>(nskn), DynamicCast<NiObject>(skn));
   }
 
   nnode->SetCollisionMode(node->GetCollisionMode());
@@ -2183,6 +2214,8 @@ bool isequal(Quaternion a, Quaternion b) {
  */
 
 template<typename K>
+int optimize_keys(KeyType ip, vector< Key<K> > &keys);
+template<typename K>
 int optimize_keys(KeyType ip, vector< Key<K> > &keys, float round) {
   int kc = (int)keys.size();
 
@@ -2283,7 +2316,7 @@ int optimize_keys<Q>(KeyType ip, vector< Key<Q> > &keys, float round) {
 
 #define B unsigned char
 template<>
-int optimize_keys<B>(KeyType ip, vector< Key<B> > &keys, float round) {
+int optimize_keys<B>(KeyType ip, vector< Key<B> > &keys) {
   int kc = (int)keys.size();
   if (kc < 3)
     return 0;
@@ -2314,7 +2347,7 @@ int optimize_keys<B>(KeyType ip, vector< Key<B> > &keys, float round) {
 
 #define S string
 template<>
-int optimize_keys<S>(KeyType ip, vector< Key<S> > &keys, float round) {
+int optimize_keys<S>(KeyType ip, vector< Key<S> > &keys) {
   int kc = (int)keys.size();
   if (kc < 2)
     return 0;
@@ -2357,7 +2390,7 @@ string optimize_node(NiTextKeyExtraDataRef node) {
   nfoprintf(stdout, " Type             : %s\n", "Text");
   nfoprintf(stdout, " Interpolation    : %s\n", "Step");
 
-  if ((kd = optimize_keys(LINEAR_KEY, keys, 0.0f)))
+  if ((kd = optimize_keys(LINEAR_KEY, keys)))
     node->SetKeys(keys), modifiedtlines++;
 
   nfoprintf(stdout, " Keys             : %6d to %6d (%.4f%%)\n", (int)keys.size() + kd, (int)keys.size(), 100.0f * keys.size() / ((int)keys.size() + kd));
@@ -2380,7 +2413,7 @@ string optimize_node(NiBoolDataRef node) {
   nfoprintf(stdout, " Type             : %s\n", "Boolean");
   nfoprintf(stdout, " Interpolation    : %s\n", KeyName[ip]);
 
-  if ((kd = optimize_keys(ip, keys, 0.0f)))
+  if ((kd = optimize_keys(ip, keys)))
     node->SetKeys(keys), modifiedtlines++;
 
   nfoprintf(stdout, " Keys             : %6d to %6d (%.4f%%)\n", (int)keys.size() + kd, (int)keys.size(), 100.0f * keys.size() / ((int)keys.size() + kd));
@@ -2691,7 +2724,7 @@ string optimize_node(bhkNiTriStripsShapeRef node) {
     rassignsector_faces((int)v.size());
 
     {
-      std::set<class objVertex *, struct V>::iterator itv;
+      set<class objVertex *, struct V>::iterator itv;
       std::vector<class objFace *>::iterator itf;
       int idx = 0;
 
@@ -2904,7 +2937,7 @@ string optimize_node(bhkPackedNiTriStripsShapeRef node) {
   rassignsector_faces((int)v.size());
 
   {
-    std::set<class objVertex *, struct V>::iterator itv;
+    set<class objVertex *, struct V>::iterator itv;
     std::vector<class objFace *>::iterator itf;
     int idx = 0;
 
@@ -3020,7 +3053,7 @@ string optimize_node(bhkPackedNiTriStripsShapeRef node) {
 }
 
 string optimize_node(bhkMoppBvTreeShapeRef node) {
-  assert(nodemotion == MO_SYS_FIXED);
+  assert((nodemotion == MO_SYS_FIXED) || (nodemotion == MO_SYS_KEYFRAMED));
   nodemopped = true;
 
   /* check supported version-number */
@@ -3697,7 +3730,7 @@ string optimize_node(NiTriShapeRef node) {
 		/* fe.: Oblivion WarCry\meshes\OE\Creatures\Skeleton Variants\Leoric Skull.nif */
 
 		/* old to new to opt */
-		int vc = (int)_v.size();
+		int vc = (int)v.size();
 		for (int vs = 0, vh = 0; vs < vc; vs++) {
 		  /* skip eliminated indices (count exclusive) */
 		  int sidx = vs;
@@ -4467,7 +4500,7 @@ void sanitize_node(NiAVObjectRef av, NiNodeRef nd, NiObjectRef ob) {
 	}
 
 	if (verbose && broken)
-	  addnote(" Invalid material replaced by WOOD.\n");
+	  addnote(" Invalid material replaced by Wood.\n");
       }
     }
 
@@ -4482,7 +4515,7 @@ void sanitize_node(NiAVObjectRef av, NiNodeRef nd, NiObjectRef ob) {
 	  bhk->SetMaterial(HAV_MAT_WOOD);
 
 	  if (verbose)
-	    addnote(" Invalid material replaced by WOOD.\n");
+	    addnote(" Invalid material replaced by Wood.\n");
 	}
       }
     }
@@ -4803,6 +4836,9 @@ bool repair_nif(NiObjectRef root) {
 //	  skn->SetSkeletonRoot(NULL);
 	  skn->SetSkinData(NULL);
 	  skn->SetSkinPartition(NULL);
+
+	  /* replace references everywhere */
+	  substitute_refs(DynamicCast<NiObject>(nskn), DynamicCast<NiObject>(skn));
 
 	  *walk = NULL;
 	}
@@ -5414,7 +5450,9 @@ void process(const char *inname, const char *ouname) {
 
 #ifdef	SOUNDOPT
 	if (isext(inname, "wav")) {
-	  if (!skipprocessing) {
+	  if (skipsounds)
+	    docopy = false;
+	  else if (!skipprocessing) {
 	    fprintf(stderr, "processing \"%s\"\n", fle);
 	    docopy = !process_wav(inname, ouname, fle);
 	    /* okay, done with */
@@ -5634,7 +5672,7 @@ void parse_cmdline(int argc, char *argv[]) {
       reattachnodes = false,
       skiphashcheck = true,
       barestripfar = true,
-      normalmapts = true,
+      normalmapts = false,
       normalsteepness = 2,
       colormapgamma = true,
       passthrough = true,
