@@ -178,6 +178,15 @@ class bsfolder; typedef	set<bsfolder, stringi> bsfolderset;
 class bsfile : public string {
 
 public:
+  void clear() {
+    memset(&iinfo, 0, sizeof(iinfo));
+    memset(&oinfo, 0, sizeof(oinfo));
+
+    inp = NULL; ics = inc = ins = ina = 0;
+    oup = NULL; ocs = ouc = ous = oua = 0;
+  }
+
+public:
   mutable struct OBBSAFileInfo iinfo;
   mutable struct OBBSAFileInfo oinfo;
   
@@ -200,6 +209,12 @@ public:
 };
 
 class bsfolder : public string {
+
+public:
+  void clear() {
+    memset(&iinfo, 0, sizeof(iinfo));
+    memset(&oinfo, 0, sizeof(oinfo));
+  }
 
 public:
   mutable struct OBBSAFolderInfo iinfo;
@@ -246,41 +261,46 @@ protected:
   size_t prg, bdy;
   int    fls, flc;
 
-  void smallcopy(unsigned int sze, unsigned int blk, FILE *src, FILE *dst) {
+  void smallcopy(const unsigned int sze, FILE *src, FILE *dst) {
+    unsigned int cnt = sze, blk, rsr, wds;
+
     /* copy with small buffer */
     do {
+      blk = min(cnt, 1024 * 1024);
+
       /* progress */
       fprintf(stderr, "Consolidating BSA-fragments: %d/%d files (%d/%d bytes)\r", fls, flc, prg, bdy);
 
-      if (fread (mem, 1, blk, src) != blk)
+      if ((rsr = fread (mem, 1, blk, src)) != blk)
 	throw runtime_error("Reading BSA failed!");
-      if (fwrite(mem, 1, blk, dst) != blk)
+      if ((wds = fwrite(mem, 1, blk, dst)) != blk)
 	throw runtime_error("Writing BSA failed!");
 
       prg += blk;
-      sze -= blk;
-      blk = min(sze, 1024 * 1024);
-    } while (sze != 0);
+      cnt -= blk;
+    } while (cnt != 0);
 
     /* progress */
     fls++;
   }
 
-  bool smallcompare(unsigned int sze, unsigned int blk, FILE *src, FILE *dst) {
+  bool smallcompare(const unsigned int sze, FILE *src, FILE *dst) {
+    unsigned int cnt = sze, blk, rsr, rds;
     bool diff = false;
 
     /* compare with small buffer */
     do {
-      if (fread(mem, 1, blk, src) != blk)
+      blk = min(cnt, 1024 * 1024);
+
+      if ((rsr = fread(mem, 1, blk, src)) != blk)
 	throw runtime_error("Reading BSA failed!");
-      if (fread(cmp, 1, blk, dst) != blk)
-	throw runtime_error("Writing BSA failed!");
+      if ((rds = fread(cmp, 1, blk, dst)) != blk)
+	throw runtime_error("Reading BSA failed!");
 
       diff = diff || !!memcmp(mem, cmp, blk);
 
-      sze -= blk;
-      blk = min(sze, 1024 * 1024);
-    } while (sze != 0);
+      cnt -= blk;
+    } while (cnt != 0);
 
     /* rewind to source-location */
     if (fseek(src, -sze, SEEK_CUR))
@@ -290,6 +310,29 @@ protected:
       throw runtime_error("Seeking BSA failed!");
 
     return diff;
+  }
+
+  unsigned int smalladler(const unsigned int sze, FILE *src) {
+    unsigned int cnt = sze, blk, rsr;
+    unsigned int adler = adler32(0,0,0);
+
+    /* compare with small buffer */
+    do {
+      blk = min(cnt, 1024 * 1024);
+
+      if ((rsr = fread(mem, 1, blk, src)) != blk)
+	throw runtime_error("Reading BSA failed!");
+
+      adler = adler32(adler, (const Bytef *)mem, blk);
+
+      cnt -= blk;
+    } while (cnt != 0);
+
+    /* rewind to source-location */
+    if (fseek(src, -sze, SEEK_CUR))
+      throw runtime_error("Seeking BSA failed!");
+
+    return adler;
   }
 
 public:
@@ -610,14 +653,13 @@ public:
 	      /* transfer the files from source-locations */
 	      for (vector<const bsfile *>::iterator ft = fs.begin(); ft != fs.end(); ++ft) {
 		struct OBBSAFileInfo fle, *ref;
-		unsigned int sze, blk, pos;
+		unsigned int sze, pos;
 		unsigned int adler;
 
 		/* this is in obsa */
 		if ((*ft)->oinfo.offset) {
 		  sze = (*ft)->oinfo.sizeFlags & (~OB_BSAFILE_FLAG_ALLFLAGS);
 		  pos = (*ft)->oinfo.offset;
-		  blk = min(sze, 1024 * 1024);
 
 		  /* fill file structure */
 		  fle.hash = (*ft)->oinfo.hash;
@@ -631,13 +673,15 @@ public:
 		  /* possible duplicate */
 		  bool diff = true;
 #ifdef	REMOVE_DOUBLES
-		  if ((ref = written[adler = (*ft)->ocs])) {
+		  if (!(adler = (*ft)->ocs))
+		    adler = (*ft)->ocs = smalladler(sze, obsa);
+		  if ((adler = (*ft)->ocs) && (ref = written[adler])) {
 		    /* goto source-location */
 		    if (fseek(fbsa, ref->offset, SEEK_SET))
 		      throw runtime_error("Seeking BSA failed!");
 
 		    /* compare with small buffer */
-		    diff = smallcompare(sze, blk, obsa, fbsa);
+		    diff = smallcompare(sze, obsa, fbsa);
 
 		    /* goto destination-location */
 		    if (fseek(fbsa, fle.offset, SEEK_SET))
@@ -661,13 +705,12 @@ public:
 
 		  /* copy with small buffer */
 		  if (diff)
-		    smallcopy(sze, blk, obsa, fbsa);
+		    smallcopy(sze, obsa, fbsa);
 		}
 		/* this is in ibsa */
 		else if ((*ft)->iinfo.offset) {
 		  sze = (*ft)->iinfo.sizeFlags & (~OB_BSAFILE_FLAG_ALLFLAGS);
 		  pos = (*ft)->iinfo.offset;
-		  blk = min(sze, 1024 * 1024);
 
 		  /* fill file structure */
 		  fle.hash = (*ft)->iinfo.hash;
@@ -681,13 +724,15 @@ public:
 		  /* possible duplicate */
 		  bool diff = true;
 #ifdef	REMOVE_DOUBLES
-		  if ((ref = written[adler = (*ft)->ics])) {
+		  if (!(adler = (*ft)->ics))
+		    adler = (*ft)->ics = smalladler(sze, ibsa);
+		  if ((adler = (*ft)->ics) && (ref = written[adler])) {
 		    /* goto source-location */
 		    if (fseek(fbsa, ref->offset, SEEK_SET))
 		      throw runtime_error("Seeking BSA failed!");
 
 		    /* compare with small buffer */
-		    diff = smallcompare(sze, blk, ibsa, fbsa);
+		    diff = smallcompare(sze, ibsa, fbsa);
 
 		    /* goto destination-location */
 		    if (fseek(fbsa, fle.offset, SEEK_SET))
@@ -711,7 +756,7 @@ public:
 
 		  /* copy with small buffer */
 		  if (diff)
-		    smallcopy(sze, blk, ibsa, fbsa);
+		    smallcopy(sze, ibsa, fbsa);
 		}
 
 		/* revoke individual-compressed flag */

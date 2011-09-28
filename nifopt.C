@@ -40,6 +40,7 @@ bool skipnewer = false;
 bool skipprocessing = false;
 bool passthrough = false;
 bool simulation = false;
+bool datamining = false;
 bool verbose = false;
 bool critical = false;
 
@@ -2211,7 +2212,143 @@ bool isequal(Quaternion a, Quaternion b) {
  * here the two forms are accelerating/deccalerating
  *
  * quadric bézier-curves:
+ *  ...
+ * tcb bézier-curves:
+ *  ...
+ *
+ * http://www.cubic.org/docs/hermite.htm
  */
+
+/* Scalar/Vector linear interpolation */
+template<typename K>
+K lerp(float t, K p, K q) {
+  float wp, wq;
+
+  wq =         t ;
+  wp = (1.0f - t);
+
+  return (p * wp) + (q * wq);
+}
+
+template<typename K>
+K lerp(float t, Key<K> p, Key<K> q) {
+  return lerp(1.0 - ((t - p.time) / (q.time - p.time)), p.data, q.data);
+}
+
+/* Scalar/Vector quadratic interpolation */
+template<typename K>
+K quad(float t, K p, K a, K b, K q) {
+  K po1 = (q - p) * 3.0f - (a * 2.0f + b);
+  K po2 = (p - q) * 2.0f + (a        + b);
+
+  K po3 = (po2 * t) + po1;
+  K po4 = (po3 * t) + a;
+  K po5 = (po4 * t) + p;
+
+  return po5;
+}
+
+template<typename K>
+K quad(float t, Key<K> p, Key<K> q) {
+  return quad(1.0 - ((t - p.time) / (q.time - p.time)), p.data, p.forward_tangent, q.backward_tangent, q.data);
+}
+
+/* Quaternion linear interpolation */
+#define Q Niflib::Quaternion
+template<>
+Q lerp(float t, Q p, Q q) {
+  float cosTheta = p.Dot(q);
+  float theta    = acosf(cosTheta);
+  float sinTheta = sinf(theta);
+  float wp, wq;
+
+  if (sinTheta > 0.001f) {
+    wq = sinf(        t  * theta) / sinTheta;
+    wp = sinf((1.0f - t) * theta) / sinTheta;
+  }
+  else {
+    wq =         t ;
+    wp = (1.0f - t);
+  }
+
+  return (p * wp) + (q * wq);
+}
+
+template<>
+Q lerp(float t, Key<Q> p, Key<Q> q) {
+  return lerp(1.0f - ((t - p.time) / (q.time - p.time)), p.data, q.data);
+}
+#undef Q
+
+/* Quaternion quadratic interpolation */
+#define Q Niflib::Quaternion
+template<>
+Q quad(float t, Q p, Q a, Q b, Q q) {
+  Q sq1 = lerp(t, p, q);
+  Q sq2 = lerp(t, a, b);
+
+  return lerp(2.0f * t * (1.0f - t), sq1, sq2);
+}
+
+template<>
+Q quad(float t, Key<Q> p, Key<Q> q) {
+  return quad(1.0f - ((t - p.time) / (q.time - p.time)), p.data, p.forward_tangent, q.backward_tangent, q.data);
+}
+#undef Q
+
+/* Scalar/Vector TCB factors (for quad) */
+template<typename K>
+void tcb(Key<K> o, K &b, Key<K> p, K &a, Key<K> q) {
+  float wo, wq;
+  float fo, fq;
+  float m1, m2;
+  K ko, kq;
+
+  // Time deltas
+  wo = p.time - o.time;
+  wq = q.time - p.time;
+
+  // Value deltas
+  ko = p.value - o.value;
+  kq = q.value - p.value;
+
+  // Speed Control
+  fo = (wo + wo) / (wo + wq);
+  fq = (wq + wq) / (wo + wq);
+
+  // The "incoming" (backward) Tangent equation:
+  m1 = (1.0f - p.tension) * (1.0f - p.continuity) * (1.0f + p.bias) * 0.5f;
+  // The "outgoing" (forward) Tangent equation:
+  m2 = (1.0f - p.tension) * (1.0f + p.continuity) * (1.0f - p.bias) * 0.5f;
+
+  // Factors for quad()
+  a = (m1 * ko + m2 * kq) * fo;
+  b = (m2 * ko + m1 * kq) * fq;
+}
+
+template<typename K>
+K tcb(float t, Key<K> oo, Key<K> o, Key<K> p, Key<K> q, Key<K> qq) {
+  float a1, a0, b0, b1;
+
+  /**/ if (t <= p.time) {
+    t = 1.0 - ((t - o.time) / (p.time - o.time));
+
+    tcb(oo, a1, o, a0, p);
+    tcb(o , b0, p, b1, q);
+
+    return quad(t, o, a0, b0, p);
+  }
+  else if (t >= p.time) {
+    t = 1.0 - ((t - p.time) / (q.time - p.time));
+
+    tcb(o, a1, p, a0, q );
+    tcb(p, b0, q, b1, qq);
+
+    return quad(t, p, a0, b0, q);
+  }
+}
+
+/* . . . . . . . . . . . . . . . . . . . . . . . . . .  */
 
 template<typename K>
 int optimize_keys(KeyType ip, vector< Key<K> > &keys);
@@ -3727,7 +3864,10 @@ string optimize_node(NiTriShapeRef node) {
 	      }
 	      /* does not contain degenerate vertices */
 	      else if (md->GetVertexCount() == _v.size()) {
-		/* fe.: Oblivion WarCry\meshes\OE\Creatures\Skeleton Variants\Leoric Skull.nif */
+		/* fe. (unbelievable, a original mesh):
+		 *  Oblivion - Meshes\meshes\creatures\ghost\lefthandemissive.nif
+		 *  Oblivion WarCry\meshes\OE\Creatures\Skeleton Variants\Leoric Skull.nif
+		 */
 
 		/* old to new to opt */
 		int vc = (int)v.size();
@@ -5510,6 +5650,58 @@ void process(const char *inname, const char *ouname) {
 
 /* ---------------------------------------------------------------------------------------------- */
 
+#undef	DATAMINING
+#ifdef	DATAMINING
+#include "nifopt-db.C"
+#else
+void analyze(const char *inname) {}
+#endif
+
+#define TASKGUI
+#ifdef	TASKGUI
+//nclude "nifopt-gui.cpp"
+#endif
+
+extern bool parse_gui();
+
+void prolog() {
+  ioinit();
+
+#ifdef	DATAMINING
+  dbinit("nifopt.sqlite");
+#endif
+
+  // initialize Tootle
+  if (!skipprocessing || havokserver) {
+    if ((geotoprimitive || optimizehavok || havokserver) && (HavokBegin(havokserver) != true))
+      exit(0);
+    if (optimizelists && (TootleInit() != TOOTLE_OK))
+      exit(0);
+    if ((TextureInit() != true))
+      exit(0);
+  }
+}
+
+void epilog() {
+  // clean up tootle
+  if (!skipprocessing) {
+    if ((geotoprimitive || optimizehavok || havokserver))
+      HavokEnd(havokserver);
+    if (optimizelists)
+      TootleCleanup();
+    if (!skipprocessing)
+      TextureCleanup();
+  }
+
+#ifdef	DATAMINING
+  dbexit();
+#endif
+
+  ioexit();
+}
+
+/* ---------------------------------------------------------------------------------------------- */
+
 char *infile = NULL;
 char *outfile = NULL;
 
@@ -5599,7 +5791,9 @@ void parse_cmdline(int argc, char *argv[]) {
   outfile = NULL;
 
   for(i = 1; i < argc; i++) {
-    /**/ if (!strcmp(argv[i], "-havokgeotoprim"))
+    /**/ if (!strcmp(argv[i], "-gui"))
+      parse_gui();
+    else if (!strcmp(argv[i], "-havokgeotoprim"))
       geotoprimitive = true;
     else if (!strcmp(argv[i], "-stripstolists"))
       stripstolists = true;
@@ -5663,6 +5857,8 @@ void parse_cmdline(int argc, char *argv[]) {
       compresslevel = atoi(argv[++i]);
     else if (!strcmp(argv[i], "-simulate"))
       simulation = true;
+    else if (!strcmp(argv[i], "-analyze"))
+      datamining = true;
     else if (!strcmp(argv[i], "-deployment"))
       stripstolists = true,
       optimizelists =
@@ -5793,23 +5989,16 @@ void summary(FILE *out) {
 int main(int argc,char **argv) {
     parse_cmdline(argc, argv);
 
-    ioinit();
-
-    // initialize Tootle
-    if (!skipprocessing || havokserver) {
-      if ((geotoprimitive || optimizehavok || havokserver) && (HavokBegin(havokserver) != true))
-	return 0;
-      if (optimizelists && (TootleInit() != TOOTLE_OK))
-	return 0;
-      if ((TextureInit() != true))
-	return 0;
-    }
+    prolog();
 
     if (infile) {
 #ifdef	NDEBUG
       try {
 #endif
-	process(infile, outfile);
+	if (datamining)
+	  analyze(infile);
+	else
+	  process(infile, outfile);
 
 	fflush(stderr);
 	fflush(stdout);
@@ -5825,17 +6014,7 @@ int main(int argc,char **argv) {
 #endif
     }
 
-    // clean up tootle
-    if (!skipprocessing) {
-      if ((geotoprimitive || optimizehavok || havokserver))
-	HavokEnd(havokserver);
-      if (optimizelists)
-	TootleCleanup();
-      if (!skipprocessing)
-	TextureCleanup();
-    }
-
-    ioexit();
+    epilog();
 
     return 0;
 }

@@ -1,4 +1,5 @@
 #include <sys/stat.h>
+#include <sys/utime.h>
 #include <sys/types.h>
 #include <direct.h>
 #include <stdlib.h>
@@ -314,6 +315,19 @@ struct iofile {
 
 /* ------------------------------------------------------------ */
 
+int iotime(const char *pathname, struct ioinfo *info) {
+  if (!isarchive(pathname)) {
+    struct utimbuf otm;
+
+    otm.actime = time(NULL);
+    otm.modtime = info->io_time;
+
+    return utime(pathname, &otm);
+  }
+
+  return 0;
+}
+
 int iostat(const char *pathname, struct ioinfo *info) {
   struct stat sinfo;
   int ret;
@@ -336,6 +350,15 @@ int iostat(const char *pathname, struct ioinfo *info) {
     ret = stat_arc(pathname, info);
 
   return ret;
+}
+
+int iotime(const char *takename, const char *pathname) {
+  struct ioinfo info;
+
+  if (!iostat(takename, &info))
+    return iotime(pathname, &info);
+
+  return -1;
 }
 
 /* ------------------------------------------------------------ */
@@ -425,6 +448,9 @@ void iocp(const char *inname, const char *ouname) {
     if (infle) fclose    (infle);
     if (oufle) fclose_arc(oufle);
   }
+
+  /* clone time-stamp */
+  iotime(inname, ouname);
 }
 
 /* ------------------------------------------------------------ */
