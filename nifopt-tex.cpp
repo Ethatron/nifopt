@@ -37,6 +37,39 @@
 #include <d3d9.h>
 #include <d3dx9.h>
 
+const char *findFormat(D3DFORMAT fmt);
+short findFormatDepth(D3DFORMAT fmt);
+char findFormatChannels(D3DFORMAT fmt);
+bool findAlpha(D3DFORMAT fmt);
+
+struct DDS_PIXELFORMAT {
+  DWORD dwSize;
+  DWORD dwFlags;
+  DWORD dwFourCC;
+  DWORD dwRGBBitCount;
+  DWORD dwRBitMask;
+  DWORD dwGBitMask;
+  DWORD dwBBitMask;
+  DWORD dwABitMask;
+};
+
+typedef struct {
+  DWORD dwMagicNumber;
+
+  DWORD dwSize;
+  DWORD dwHeaderFlags;
+  DWORD dwHeight;
+  DWORD dwWidth;
+  DWORD dwPitchOrLinearSize;
+  DWORD dwDepth; // only if DDS_HEADER_FLAGS_VOLUME is set in dwHeaderFlags
+  DWORD dwMipMapCount;
+  DWORD dwReserved1[11];
+  DDS_PIXELFORMAT ddspf;
+  DWORD dwSurfaceFlags;
+  DWORD dwCubemapFlags;
+  DWORD dwReserved2[3];
+} DDS_HEADER;
+
 #include "nifopt-tex-squish.h"
 
 #define	fabs(x)	((x) >= 0 ? (x) : -(x))
@@ -200,7 +233,10 @@ static void AccuXYZD(float *nn, ULONG n, int level, int l) {
     vec[1] /= (level * NORMALS_SCALEBYLEVEL);
   }
 
+  /* prevent singularity */
   len = sqrt(vec[1] * vec[1] + vec[2] * vec[2] + vec[3] * vec[3]);
+  if (!len)
+    len = nn[1] = 1.0f;
 
   vec[1] /= len;
   vec[2] /= len;
@@ -233,7 +269,10 @@ static void AccuXYCD(float *nn, ULONG n, int level, int l) {
     vec[4] /= (level * NORMALS_SCALEBYLEVEL);
   }
 
+  /* prevent singularity */
   len = sqrt(vec[4] * vec[4] + vec[2] * vec[2] + vec[3] * vec[3]);
+  if (!len)
+    len = nn[4] = 1.0f;
 
   vec[2] /= len;
   vec[3] /= len;
@@ -366,7 +405,10 @@ template<int mode>
 static void NormXYZD(float *onn, float *nn, int av) {
   float len;
 
+  /* prevent singularity */
   len = sqrt(nn[1] * nn[1] + nn[2] * nn[2] + nn[3] * nn[3]);
+  if (!len)
+    len = nn[1] = 1.0f;
 
   onn[0] = nn[0] / av;  /*d[ 0,1]*/
   onn[1] = nn[1] / len; /*z[-1,1]*/
@@ -383,7 +425,10 @@ template<int mode>
 static void NormXYCD(float *onn, float *nn, int av) {
   float len;
 
+  /* prevent singularity */
   len = sqrt(nn[4] * nn[4] + nn[2] * nn[2] + nn[3] * nn[3]);
+  if (!len)
+    len = nn[4] = 1.0f;
 
   onn[0] = nn[0] / av;  /*d[ 0,1]*/
   onn[1] = nn[1] / av;  /*c[-1,1]*/
@@ -430,7 +475,11 @@ static void LookXYZD(float *nn, float *nr) {
 	fabs(nn[2]),
 	fabs(nn[3])
       )
-      / fabs(nn[1])
+      /
+      max(
+	fabs(nn[1]),
+	fabs(0.001f)
+      )
     );
 
     /* collect magnitudes */
@@ -541,13 +590,20 @@ static ULONG JoinXYZD(float *nn, float *nr) {
 	fabs(vec[3]) * derivb
       ));
 #else
-    float up = derivb *
+    float up = derivb * (
       max(
 	fabs(vec[2]),
 	fabs(vec[3])
       )
-      / fabs(vec[1]);
+      /
+      max(
+	fabs(vec[1]),
+	fabs(0.001f)
+      )
+    );
 
+    /* prevent singularity */
+    vec[1] = max(vec[1], 0.001f);
     if (up > 1.0f) {
       vec[2] /= up;
       vec[3] /= up;
@@ -555,7 +611,7 @@ static ULONG JoinXYZD(float *nn, float *nr) {
 #endif
   }
   else if ((mode & TRGTMODE_CODING) != TRGTMODE_CODING_XYZ) {
-    vec[1] = max(0.0f, vec[1]);
+    vec[1] = max(vec[1], 0.0f);
   }
 
   /* ################################################################# */
@@ -761,7 +817,7 @@ void TextureCleanup() {
 /* ####################################################################################
  */
 
-static bool TextureConvert(D3DSURFACE_DESC &info, LPDIRECT3DTEXTURE9 *tex) {
+static bool TextureConvert(D3DSURFACE_DESC &info, LPDIRECT3DTEXTURE9 *tex, bool black) {
   LPDIRECT3DTEXTURE9 replct;
   LPDIRECT3DSURFACE9 stex, srep;
   HRESULT res;
@@ -783,6 +839,27 @@ static bool TextureConvert(D3DSURFACE_DESC &info, LPDIRECT3DTEXTURE9 *tex) {
 
   res = D3DXLoadSurfaceFromSurface(srep, NULL, NULL, stex, NULL, NULL, D3DX_FILTER_NONE, 0);
 
+  /* this is not right unfortunately L8 becomes L8A8 */
+#if 0
+  /* put a custom default alpha-value */
+  if (!findAlpha(info.Format)) {
+    D3DLOCKED_RECT texs;
+    unsigned char a = (black ? 0x00000000 : 0xFF000000);
+
+    replct->LockRect(0, &texs, NULL, 0);
+    ULONG *sTex = (ULONG *)texs.pBits;
+
+    for (int y = 0; y < (int)info.Height; y += 1) {
+    for (int x = 0; x < (int)info.Width ; x += 1) {
+      ULONG t = sTex[(y * info.Width) + x];
+      sTex[(y * info.Width) + x] = (t & 0x00FFFFFF) | a;
+    }
+    }
+
+    replct->UnlockRect(0);
+  }
+#endif
+
   stex->Release();
   srep->Release();
 
@@ -800,11 +877,11 @@ static bool TextureConvert(D3DSURFACE_DESC &info, LPDIRECT3DTEXTURE9 *tex) {
   }
 }
 
-static bool TextureConvert(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool gamma, D3DFORMAT target) {
+static bool TextureConvert(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool dither, bool gamma, D3DFORMAT target) {
   LPDIRECT3DTEXTURE9 replct;
   D3DSURFACE_DESC texo;
   LPDIRECT3DSURFACE9 stex, srep;
-  DWORD filter = D3DX_FILTER_BOX | D3DX_FILTER_DITHER | (gamma ? D3DX_FILTER_SRGB : 0);
+  DWORD filter = D3DX_FILTER_BOX | (dither ? D3DX_FILTER_DITHER : 0) | (gamma ? D3DX_FILTER_SRGB : 0);
   HRESULT res;
 
   (*tex)->GetLevelDesc(0, &texo);
@@ -826,29 +903,79 @@ static bool TextureConvert(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool gamma, D3
     minlevel = -minlevel, levels = min(minlevel, levels);
 
   assert(levels >= 0);
-  if (pD3DDevice->CreateTexture(texo.Width, texo.Height, levels, 0, target, D3DPOOL_MANAGED, &replct, NULL) == D3D_OK) {
-    (*tex)->GetSurfaceLevel(0, &stex);
-    replct->GetSurfaceLevel(0, &srep);
+  res = pD3DDevice->CreateTexture(texo.Width, texo.Height, levels, 0, target, D3DPOOL_MANAGED, &replct, NULL);
+  if (res != D3D_OK)
+    return false;
 
-    res = D3DXLoadSurfaceFromSurface(srep, NULL, NULL, stex, NULL, NULL, filter, 0);
+  (*tex)->GetSurfaceLevel(0, &stex);
+  replct->GetSurfaceLevel(0, &srep);
 
-    stex->Release();
-    srep->Release();
+  res = D3DXLoadSurfaceFromSurface(srep, NULL, NULL, stex, NULL, NULL, filter, 0);
 
-    if (res == D3D_OK) {
-      (*tex)->Release();
-      (*tex) = replct;
+  stex->Release();
+  srep->Release();
 
-      if (D3DXFilterTexture((*tex), NULL, 0, filter) == D3D_OK)
-	return true;
-    }
-    else {
-      replct->Release();
-      replct = (*tex);
-    }
+  if (res == D3D_OK) {
+    (*tex)->Release();
+    (*tex) = replct;
+
+    if (D3DXFilterTexture((*tex), NULL, 0, filter) == D3D_OK)
+      return true;
+
+    return false;
   }
+  else {
+    replct->Release();
+    replct = (*tex);
 
-  return false;
+    return false;
+  }
+}
+
+template<typename type>
+static bool TextureConvert(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool dither, D3DFORMAT target);
+
+template<>
+static bool TextureConvert<long>(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool dither, D3DFORMAT target) {
+  return TextureConvert(minlevel, tex, dither, false, target);
+};
+
+template<>
+static bool TextureConvert<float>(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool dither, D3DFORMAT target) {
+  return TextureConvert(minlevel, tex, dither, true, target);
+};
+
+static bool TextureCollapse(LPDIRECT3DTEXTURE9 *tex, D3DFORMAT target) {
+  LPDIRECT3DTEXTURE9 replct;
+  LPDIRECT3DSURFACE9 stex, srep;
+  DWORD filter = D3DX_FILTER_BOX | D3DX_FILTER_DITHER;
+  HRESULT res;
+
+  res = pD3DDevice->CreateTexture(1, 1, 0, 0, target, D3DPOOL_MANAGED, &replct, NULL);
+  if (res != D3D_OK)
+    return false;
+
+  (*tex)->GetSurfaceLevel(0, &stex);
+  replct->GetSurfaceLevel(0, &srep);
+
+  RECT oo = {0,0,1,1};
+  res = D3DXLoadSurfaceFromSurface(srep, NULL, &oo, stex, NULL, &oo, filter, 0);
+
+  stex->Release();
+  srep->Release();
+
+  if (res == D3D_OK) {
+    (*tex)->Release();
+    (*tex) = replct;
+
+    return true;
+  }
+  else {
+    replct->Release();
+    replct = (*tex);
+
+    return false;
+  }
 }
 
 /* ####################################################################################
@@ -897,6 +1024,17 @@ static int TCOMPRESS_CHANNELS(int fmt) {
   return 0;
 }
 
+/* in Oblivion the encoding to DXT1 apparently turns
+ * off the shader which handle the alpha-information
+ * to prevent that just code to DXT1 when the information
+ * is neutral:
+ * - for normals, black means no specular
+ * - for colors, white means no transparency/parallax
+ */
+#define CollapseAlpha(fmt, blk, wht)	(TCOMPRESS_NORMAL(fmt) ? blk       : wht      )
+#define MinimalAlpha(fmt, blk, wht, bw)	(TCOMPRESS_NORMAL(fmt) ? blk || bw : wht || bw)
+#define HasAlpha(fmt, org)		((TCOMPRESS_CHANNELS(fmt) > 3) && (org != D3DFMT_DXT1))
+
 /* ------------------------------------------------------------------------------------
  */
 
@@ -928,12 +1066,12 @@ static bool TextureConvertRAW(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool optimi
 
   /* convert to ARGB8 (TODO: support at least the 16bit formats as well) */
   D3DFORMAT origFormat = texo.Format;
-  if ((texo.Format != D3DFMT_A8R8G8B8) && !TextureConvert(texo, tex))
+  if ((texo.Format != D3DFMT_A8R8G8B8) && !TextureConvert(texo, tex, TCOMPRESS_NORMAL(format)))
     return false;
 
   /* make a histogram of the alpha-channel */
   if (optimize /*TCOMPRESS_CHANNELS(format) == 4*/) {
-    unsigned int histo[256], histn = 0;
+    unsigned int histo[4][256], histn[4] = {0,0,0,0};
     memset(&histo, 0, sizeof(histo));
     bool grey = true, blank = true;
     unsigned mask4 = 0;
@@ -968,7 +1106,13 @@ static bool TextureConvertRAW(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool optimi
 		((b ^ (b >> 5)) <<  0);
 
 #pragma omp atomic
-      histo[a]++;
+      histo[0][a]++;
+#pragma omp atomic
+      histo[1][r]++;
+#pragma omp atomic
+      histo[2][g]++;
+#pragma omp atomic
+      histo[3][b]++;
 
       mask4 |= q;
       mask5 |= p;
@@ -979,72 +1123,96 @@ static bool TextureConvertRAW(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool optimi
 	blank = false;
     }}
 
-    for (unsigned int h = 0; h < 256; h += 1)
-      if (histo[h])
-	histn++;
-
     (*tex)->UnlockRect(0);
 
-    bool white = ((histn == 1) && histo[0xFF]);
-    bool blawh = ((histn == 2) && histo[0xFF] && histo[0x00]);
+    for (unsigned int h = 0; h < 256; h += 1) {
+      if (histo[0][h]) histn[0]++;
+      if (histo[1][h]) histn[1]++;
+      if (histo[2][h]) histn[2]++;
+      if (histo[3][h]) histn[3]++;
+    }
+
+    if ((histn[0] == 1) &&
+	(histn[1] == 1) &&
+	(histn[2] == 1) &&
+	(histn[3] == 1)) {
+      addnote(" Planar image detected, collapsing to size 1x1.\n");
+
+      return TextureCollapse(tex, D3DFMT_A8R8G8B8);
+    }
+
+    bool white = ((histn[0] == 1) && histo[0][0xFF]                  );
+    bool black = ((histn[0] == 1) &&                   histo[0][0x00]);
+    bool blawh = ((histn[0] == 2) && histo[0][0xFF] && histo[0][0x00]);
 
     if (!blank) {
       /* 6bit candidate */
       if (!(mask5 & 0x00070307)) {
-	if (!grey)
-	  addnote(" Quantized 565 color image detected.\n");
-	else
-	  addnote(" Quantized 6 greyscale image detected.\n");
+	if (!grey) addnote(" Quantized 565 color image detected.\n");
+	else       addnote(" Quantized 6 greyscale image detected.\n");
 
-	if (white && !grey)
-	  return TextureConvert(minlevel, tex, false, D3DFMT_R5G6B5);
-	if (white && grey)
+	/* check if Alpha is killable */
+	if (CollapseAlpha(format, black, white)) {
+	  if (HasAlpha(format, origFormat))
+	    addnote(" Automatic dropped alpha-channel.\n");
+
+	  if (!grey)
+	    return TextureConvert<type>(minlevel, tex, !TCOMPRESS_NORMAL(format), D3DFMT_R5G6B5);
 	  if (format != TCOMPRESS_L)
 	    return TextureConvertRAW<UTYPE, type, TCOMPRESS_L>(minlevel, tex, false);
+	}
       }
 
       /* 5bit candidate */
       if (!(mask5 & 0x00070707)) {
-	if (!grey)
-	  addnote(" Quantized 555 color image detected.\n");
-	else
-	  addnote(" Quantized 5 greyscale image detected.\n");
+	if (!grey) addnote(" Quantized 555 color image detected.\n");
+	else       addnote(" Quantized 5 greyscale image detected.\n");
 
-	if ((white || blawh) && !grey)
-	  return TextureConvert(minlevel, tex, false, D3DFMT_A1R5G5B5);
-	if (white && grey)
+	/* check if Alpha is killable */
+	if (CollapseAlpha(format, black, white) && grey) {
+	  if (HasAlpha(format, origFormat))
+	    addnote(" Automatic dropped alpha-channel.\n");
+
 	  if (format != TCOMPRESS_L)
 	    return TextureConvertRAW<UTYPE, type, TCOMPRESS_L>(minlevel, tex, false);
+	}
+
+	/* check if Alpha is 1bit */
+	if (MinimalAlpha(format, black, white, blawh))
+	  return TextureConvert<type>(minlevel, tex, !TCOMPRESS_NORMAL(format), D3DFMT_A1R5G5B5);
       }
 
       /* 4bit candidate */
       if (!(mask4 & 0x0F0F0F0F)) {
-	if (!grey)
-	  addnote(" Quantized 444 color image detected.\n");
-	else
-	  addnote(" Quantized 4 greyscale image detected.\n");
+	if (!grey) addnote(" Quantized 444 color image detected.\n");
+	else       addnote(" Quantized 4 greyscale image detected.\n");
 
-	if (white)
-	  if (TCOMPRESS_TRANS(format))
+	if (CollapseAlpha(format, black, white))
+	  if (HasAlpha(format, origFormat))
 	    addnote(" Automatic dropped alpha-channel.\n");
 
 	if (grey) {
 	  if (TCOMPRESS_CHANNELS(format) > 2)
 	    addnote(" Automatic greyscale conversion.\n");
 
-	  if (!white)
-	    return TextureConvert(minlevel, tex, false, D3DFMT_A4L4);
-	  else
+	  /* check if Alpha is killable */
+	  if (CollapseAlpha(format, black, white)) {
 	    if (format != TCOMPRESS_L)
 	      return TextureConvertRAW<UTYPE, type, TCOMPRESS_L>(minlevel, tex, false);
+	  }
+	  else
+	    return TextureConvert<type>(minlevel, tex, !TCOMPRESS_NORMAL(format), D3DFMT_A4L4);
 	}
 	else {
-	  if (white)
-	    return TextureConvert(minlevel, tex, false, D3DFMT_R5G6B5);
-	  else if (blawh)
-	    return TextureConvert(minlevel, tex, false, D3DFMT_A1R5G5B5);
-	  else
-	    return TextureConvert(minlevel, tex, false, D3DFMT_A4R4G4B4);
+	  /* check if Alpha is killable */
+	  if (CollapseAlpha(format, black, white))
+	    return TextureConvert<type>(minlevel, tex, !TCOMPRESS_NORMAL(format), D3DFMT_R5G6B5);
+
+	  /* check if Alpha is 1bit */
+	  if (MinimalAlpha(format, black, white, blawh))
+	    return TextureConvert<type>(minlevel, tex, !TCOMPRESS_NORMAL(format), D3DFMT_A1R5G5B5);
+
+	  return TextureConvert<type>(minlevel, tex, !TCOMPRESS_NORMAL(format), D3DFMT_A4R4G4B4);
 	}
       }
 
@@ -1053,8 +1221,9 @@ static bool TextureConvertRAW(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool optimi
 	if (TCOMPRESS_CHANNELS(format) > 2)
 	  addnote(" Automatic greyscale conversion.\n");
 
-	if (white) {
-	  if (TCOMPRESS_TRANS(format))
+	/* check if Alpha is killable */
+	if (CollapseAlpha(format, black, white)) {
+	  if (HasAlpha(format, origFormat))
 	    addnote(" Automatic dropped alpha-channel.\n");
 
 	  if (format != TCOMPRESS_L)
@@ -1066,41 +1235,41 @@ static bool TextureConvertRAW(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool optimi
       }
 
       /* two colors in alpha */
-      if (histn <= 2) {
-	/* black and white? */
-	if (blawh) {
+      if (histn[0] <= 2) {
+	/* check if Alpha is killable */
+	if (CollapseAlpha(format, black, white)) {
 	  /* if it wasn't transparent it must be uncorrelated! */
-	  if (/*TCOMPRESS_TRANS(format) ||*/ white) {
-	    if (TCOMPRESS_TRANS(format))
-	      addnote(" Automatic dropped alpha-channel.\n");
+	  if (HasAlpha(format, origFormat))
+	    addnote(" Automatic dropped alpha-channel.\n");
 
-	    /* "drop" the alpha-channel, 1bit alpha */
-	    if (format == TCOMPRESS_RGBA)
-	      return TextureConvertRAW<UTYPE, type, TCOMPRESS_RGB>(minlevel, tex, false);
-	    if (format == TCOMPRESS_RGBH)
-	      return TextureConvertRAW<UTYPE, type, TCOMPRESS_RGB>(minlevel, tex, false);
-	    if (format == TCOMPRESS_XYZD)
-	      return TextureConvertRAW<UTYPE, type, TCOMPRESS_XYZ>(minlevel, tex, false);
-	    if (format == TCOMPRESS_xyzD)
-	      return TextureConvertRAW<UTYPE, type, TCOMPRESS_xyz>(minlevel, tex, false);
-	    if (format == TCOMPRESS_LA)
-	      return TextureConvertRAW<UTYPE, type, TCOMPRESS_L  >(minlevel, tex, false);
-	  }
-
-	  /* TODO: if all black and trans convert to 4x4 black L8 */
+	  /* "drop" the alpha-channel, 1bit alpha */
+	  if (format == TCOMPRESS_RGBA)
+	    return TextureConvertRAW<UTYPE, type, TCOMPRESS_RGB>(minlevel, tex, false);
+	  if (format == TCOMPRESS_RGBH)
+	    return TextureConvertRAW<UTYPE, type, TCOMPRESS_RGB>(minlevel, tex, false);
+	  if (format == TCOMPRESS_XYZD)
+	    return TextureConvertRAW<UTYPE, type, TCOMPRESS_XYZ>(minlevel, tex, false);
+	  if (format == TCOMPRESS_xyzD)
+	    return TextureConvertRAW<UTYPE, type, TCOMPRESS_xyz>(minlevel, tex, false);
+	  if (format == TCOMPRESS_LA)
+	    return TextureConvertRAW<UTYPE, type, TCOMPRESS_L  >(minlevel, tex, false);
 	}
-      }
 
-      /* TODO: compare RMS of DXT3 vs. DXT5 and choose */
-      if ((!white && !blawh) && verbose)
-	addnote(" Alpha-channel has %d distinct value(s).\n", histn);
+	/* TODO: if all black and trans convert to 4x4 black L8 */
+      }
     }
     else {
-      /* two colors in alpha */
-      if (histn <= 2) {
-	return TextureConvert(minlevel, tex, false, D3DFMT_A1);
-      }
+      /* check if Alpha is 1bit */
+      if (MinimalAlpha(format, black, white, blawh))
+	return TextureConvert<type>(minlevel, tex, !TCOMPRESS_NORMAL(format), D3DFMT_A1);
+
+      if (format != TCOMPRESS_A)
+	return TextureConvertRAW<UTYPE, type, TCOMPRESS_A >(minlevel, tex, false);
     }
+
+    /* TODO: compare RMS of DXT3 vs. DXT5 and choose */
+    if (verbose && HasAlpha(format, origFormat))
+      addnote(" Alpha-channel has %d distinct value(s).\n", histn[0]);
   }
 
   /* the lowest mip-level contains a row or a column of 4x4 blocks
@@ -1131,7 +1300,7 @@ static bool TextureConvertRAW(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool optimi
 	    if (format == TCOMPRESS_XYZ ) pD3DDevice->CreateTexture(texo.Width, texo.Height, levels, 0, D3DFMT_R8G8B8  , D3DPOOL_SYSTEMMEM, &text, NULL); break;
     case 2: if (format == TCOMPRESS_LA  ) pD3DDevice->CreateTexture(texo.Width, texo.Height, levels, 0, D3DFMT_A8L8    , D3DPOOL_SYSTEMMEM, &text, NULL);
 	    if (format == TCOMPRESS_XYz ) abort(); /* no R8G8 available */ break;
-    case 1: if (format == TCOMPRESS_A   ) pD3DDevice->CreateTexture(texo.Width, texo.Height, levels, 0, D3DFMT_L8      , D3DPOOL_SYSTEMMEM, &text, NULL);
+    case 1: if (format == TCOMPRESS_A   ) pD3DDevice->CreateTexture(texo.Width, texo.Height, levels, 0, D3DFMT_A8      , D3DPOOL_SYSTEMMEM, &text, NULL);
 	    if (format == TCOMPRESS_L   ) pD3DDevice->CreateTexture(texo.Width, texo.Height, levels, 0, D3DFMT_L8      , D3DPOOL_SYSTEMMEM, &text, NULL);
 	    if (format == TCOMPRESS_xyZ ) pD3DDevice->CreateTexture(texo.Width, texo.Height, levels, 0, D3DFMT_L8      , D3DPOOL_SYSTEMMEM, &text, NULL); break;
   }
@@ -1528,13 +1697,13 @@ static bool TextureCompressDXT(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool optim
 
   /* convert to ARGB8 (TODO: support at least the 16bit formats as well) */
   D3DFORMAT origFormat = texo.Format;
-  if ((texo.Format != D3DFMT_A8R8G8B8) && !TextureConvert(texo, tex))
+  if ((texo.Format != D3DFMT_A8R8G8B8) && !TextureConvert(texo, tex, TCOMPRESS_NORMAL(format)))
     return false;
 
   /* make a histogram of the alpha-channel */
   int squish__kDxtD = squish::kDxt5;
   if (optimize /*TCOMPRESS_CHANNELS(format) == 4*/) {
-    unsigned int histo[256], histn = 0;
+    unsigned int histo[4][256], histn[4] = {0,0,0,0};
     memset(&histo, 0, sizeof(histo));
     bool grey = true, blank = true;
 
@@ -1553,7 +1722,13 @@ static bool TextureCompressDXT(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool optim
       ULONG b = (t >>  0) & 0xFF; /*a*/
 
 #pragma omp atomic
-      histo[a]++;
+      histo[0][a]++;
+#pragma omp atomic
+      histo[1][r]++;
+#pragma omp atomic
+      histo[2][g]++;
+#pragma omp atomic
+      histo[3][b]++;
 
       if ((r != g) || (g != b))
 	grey = false;
@@ -1561,14 +1736,27 @@ static bool TextureCompressDXT(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool optim
 	blank = false;
     }}
 
-    for (unsigned int h = 0; h < 256; h += 1)
-      if (histo[h])
-	histn++;
-
     (*tex)->UnlockRect(0);
 
-    bool white = ((histn == 1) && histo[0xFF]);
-    bool blawh = ((histn == 2) && histo[0xFF] && histo[0x00]);
+    for (unsigned int h = 0; h < 256; h += 1) {
+      if (histo[0][h]) histn[0]++;
+      if (histo[1][h]) histn[1]++;
+      if (histo[2][h]) histn[2]++;
+      if (histo[3][h]) histn[3]++;
+    }
+
+    if ((histn[0] == 1) &&
+	(histn[1] == 1) &&
+	(histn[2] == 1) &&
+	(histn[3] == 1)) {
+      addnote(" Planar image detected, collapsing to size 1x1.\n");
+
+      return TextureCollapse(tex, D3DFMT_A8R8G8B8);
+    }
+
+    bool white = ((histn[0] == 1) && histo[0][0xFF]                  );
+    bool black = ((histn[0] == 1) &&                   histo[0][0x00]);
+    bool blawh = ((histn[0] == 2) && histo[0][0xFF] && histo[0][0x00]);
 
     /* if it wasn't transparent it must be uncorrelated! */
     if (grey) {
@@ -1576,36 +1764,32 @@ static bool TextureCompressDXT(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool optim
 	addnote(" Automatic greyscale conversion.\n");
 
       /* give the same 1:4 compression at no loss (DXT1 is 1:6) */
-      if (white && (origFormat != D3DFMT_DXT1)) {
-	if (TCOMPRESS_TRANS(format))
+      /* check if Alpha is killable */
+      if (CollapseAlpha(format, black, white) && (origFormat != D3DFMT_DXT1)) {
+	if (HasAlpha(format, origFormat))
 	  addnote(" Automatic dropped alpha-channel.\n");
 
 	return TextureConvertRAW<UTYPE, type, TCOMPRESS_L >(minlevel, tex, false);
       }
-      /* may even go down to A1 */
+      /* check if Color is killable */
       else if (blank) {
 	if (TCOMPRESS_TRANS(format))
 	  addnote(" Automatic dropped color-channels.\n");
 
+	/* may even go down to A1 */
 	return TextureConvertRAW<UTYPE, type, TCOMPRESS_A >(minlevel, tex, true);
       }
-      /* gives only 1:2 compression
-      else
-	return TextureConvertRAW<UTYPE, type, TCOMPRESS_LA>(minlevel, tex, false);
-       */
+      /* gives only 1:2 or 1:4 compression (DXT1 is 1:6, other 1:4) */
+      else if ((origFormat != D3DFMT_DXT1) && (origFormat != D3DFMT_DXT3) && (origFormat != D3DFMT_DXT5))
+	/* may even go down to A4L4 */
+	return TextureConvertRAW<UTYPE, type, TCOMPRESS_LA>(minlevel, tex, true);
     }
 
     /* two colors in alpha */
-    if (histn <= 2) {
-      /* black and white?, destroy color */
-      if (blawh) {
-	/* if it wasn't transparent it must be uncorrelated! */
-	if (TCOMPRESS_TRANS(format))
-	  origFormat = D3DFMT_DXT1;
-      }
-      /* white? */
-      else if (white) {
-	if (origFormat != D3DFMT_DXT1)
+    if (histn[0] <= 2) {
+      /* check if Alpha is killable */
+      if (CollapseAlpha(format, black, white) && (origFormat != D3DFMT_DXT1)) {
+	if (HasAlpha(format, origFormat))
 	  addnote(" Automatic dropped alpha-channel.\n");
 
 	/* "drop" the alpha-channel, 1bit alpha */
@@ -1618,35 +1802,42 @@ static bool TextureCompressDXT(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool optim
 	if (format == TCOMPRESS_xyzD)
 	  return TextureCompressDXT<UTYPE, type, TCOMPRESS_xyz>(minlevel, tex, false);
       }
+      /* black and white?, destroy color */
+      else if (MinimalAlpha(format, black, white, blawh)) {
+	/* if it wasn't transparent it must be uncorrelated! */
+	if (TCOMPRESS_TRANS(format))
+	  origFormat = D3DFMT_DXT1;
+      }
     }
 
     /* sixteen colors in alpha */
-    if (!white && (histn >= 1) && histn <= 16) {
+    if (!white && (histn[0] >= 1) && (histn[0] <= 16)) {
       int histc = 0;
-      if (histo[0x00]) histc++; if (histo[0x11]) histc++;
-      if (histo[0x22]) histc++; if (histo[0x33]) histc++;
-      if (histo[0x44]) histc++; if (histo[0x55]) histc++;
-      if (histo[0x66]) histc++; if (histo[0x77]) histc++;
-      if (histo[0x88]) histc++; if (histo[0x99]) histc++;
-      if (histo[0xAA]) histc++; if (histo[0xBB]) histc++;
-      if (histo[0xCC]) histc++; if (histo[0xDD]) histc++;
-      if (histo[0xEE]) histc++; if (histo[0xFF]) histc++;
+      if (histo[0][0x00]) histc++; if (histo[0][0x11]) histc++;
+      if (histo[0][0x22]) histc++; if (histo[0][0x33]) histc++;
+      if (histo[0][0x44]) histc++; if (histo[0][0x55]) histc++;
+      if (histo[0][0x66]) histc++; if (histo[0][0x77]) histc++;
+      if (histo[0][0x88]) histc++; if (histo[0][0x99]) histc++;
+      if (histo[0][0xAA]) histc++; if (histo[0][0xBB]) histc++;
+      if (histo[0][0xCC]) histc++; if (histo[0][0xDD]) histc++;
+      if (histo[0][0xEE]) histc++; if (histo[0][0xFF]) histc++;
 
       /* quantized only? should be extreme rare ... */
-      if (histc == histn) {
-	if (!white && !blawh)
+      if (histc == histn[0]) {
+	if (!white && !blawh) {
 	  addnote(" Quantized alpha-channel detected.\n");
 
-	/* go DXT3 (this can even happen if DXT5 was used
-	 * with black and white end-points)
-	 */
-	origFormat = D3DFMT_DXT3;
+	  /* go DXT3 (this can even happen if DXT5 was used
+	   * with black and white end-points)
+	   */
+	  origFormat = D3DFMT_DXT3;
+	}
       }
     }
 
     /* TODO: compare RMS of DXT3 vs. DXT5 and choose */
-    if (!white && !blawh)
-      addnote(" Alpha-channel has %d distinct value(s).\n", histn);
+    if (verbose && HasAlpha(format, origFormat))
+      addnote(" Alpha-channel has %d distinct value(s).\n", histn[0]);
   }
 
   /* the lowest mip-level contains a row or a column of 4x4 blocks
@@ -1701,6 +1892,16 @@ static bool TextureCompressDXT(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool optim
   /* damit */
   if (!text)
     return false;
+
+  /* calculate pointer of compressed blocks */
+  int blocksize = 0;
+  switch (TCOMPRESS_CHANNELS(format)) {
+    case 4: if (!(flags & squish::kDxt1)) {
+	    blocksize = ((8+8) / 4); break; }/* 4x4x4 -> 16bytes */
+    case 3: blocksize = (( 8 ) / 4); break;  /* 4x4x3 ->  8bytes */
+    case 2: blocksize = ((4+4) / 2); break;  /* 4x4x2 -> 16bytes */
+    case 1: blocksize = (( 4 ) / 2); break;  /* 4x4x1 ->  8bytes */
+  }
 
   (*tex)->LockRect(0, &texs, NULL, 0);
 
@@ -1760,19 +1961,14 @@ static bool TextureCompressDXT(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool optim
 #pragma omp parallel for if((int)texd.Height >= (lv >> 1))	\
 			 schedule(dynamic, 1)			\
 			 shared(texo, texd, texr)		\
-			 firstprivate(dTex)
+			 firstprivate(dTex, blocksize)
     for (int y = 0; y < (int)texd.Height; y += 4) {
       if (!(y & 0xF))
 	fprintf(stderr, "level %2d/%2d: line %4d/%4d processed        \r", l + 1, level, y, texd.Height);
 
       /* calculate pointer of compressed blocks */
       ULONG *wTex = (ULONG *)texr.pBits;
-      switch (TCOMPRESS_CHANNELS(format)) {
-	case 4: wTex += ((y + 3) / 4) * ((texd.Width + 3) / 4) * ((8+8) / 4); break; /* 4x4x4 -> 16bytes */
-	case 3: wTex += ((y + 3) / 4) * ((texd.Width + 3) / 4) * (( 8 ) / 4); break; /* 4x4x3 ->  8bytes */
-	case 2: wTex += ((y + 3) / 4) * ((texd.Width + 3) / 4) * ((4+4) / 2); break; /* 4x4x2 -> 16bytes */
-	case 1: wTex += ((y + 3) / 4) * ((texd.Width + 3) / 4) * (( 4 ) / 2); break; /* 4x4x1 ->  8bytes */
-      }
+      wTex += ((y + 3) / 4) * ((texd.Width + 3) / 4) * blocksize;
 
 //    assert(wTex == dTex);
 
@@ -1917,12 +2113,8 @@ static bool TextureCompressDXT(int minlevel, LPDIRECT3DTEXTURE9 *tex, bool optim
 #endif
 
       /* advance pointer of compressed blocks */
-      switch (TCOMPRESS_CHANNELS(format)) {
-        case 4: wTex += ((8+8) / 4); dTex += ((8+8) / 4); break; /* 4x4x4 -> 16bytes */
-        case 3: wTex += (( 8 ) / 4); dTex += (( 8 ) / 4); break; /* 4x4x3 ->  8bytes */
-        case 2: wTex += ((4+4) / 2); dTex += ((4+4) / 2); break; /* 4x4x2 -> 16bytes */
-        case 1: wTex += (( 4 ) / 2); dTex += (( 4 ) / 2); break; /* 4x4x1 ->  8bytes */
-      }
+      wTex += blocksize;
+      dTex += blocksize;
     }
     }
 
@@ -2072,9 +2264,9 @@ static bool TextureCompressQDM(LPDIRECT3DTEXTURE9 *base, LPDIRECT3DTEXTURE9 *nor
     return false;
 
   /* convert to ARGB8 (TODO: support at least the 16bit formats as well) */
-  if ((baseo.Format != D3DFMT_A8B8G8R8) && !TextureConvert(baseo, base))
+  if ((baseo.Format != D3DFMT_A8B8G8R8) && !TextureConvert(baseo, base, false))
     return false;
-  if ((normo.Format != D3DFMT_A8B8G8R8) && !TextureConvert(normo, norm))
+  if ((normo.Format != D3DFMT_A8B8G8R8) && !TextureConvert(normo, norm, true))
     return false;
 
   /* the lowest mip-level contains a row or a column of 4x4 blocks
@@ -2281,81 +2473,82 @@ const struct formatID {
   const char *name;
   short depth;
   char channels;
+  bool alpha;
 } formatDatabase[] = {
 
-  { D3DFMT_R8G8B8	      , "R8G8B8", 8, 3 },
-  { D3DFMT_A8R8G8B8           , "A8R8G8B8", 8, 4 },
-  { D3DFMT_X8R8G8B8           , "X8R8G8B8", 8, 4 },
-  { D3DFMT_R5G6B5             , "R5G6B5", 6, 3 },
-  { D3DFMT_X1R5G5B5           , "X1R5G5B5", 5, 3 },
-  { D3DFMT_A1R5G5B5           , "A1R5G5B5", 5, 4 },
-  { D3DFMT_A4R4G4B4           , "A4R4G4B4", 4, 4 },
-  { D3DFMT_R3G3B2             , "R3G3B2", 3, 3 },
-  { D3DFMT_A8                 , "A8", 8, 1 },
-  { D3DFMT_A8R3G3B2           , "A8R3G3B2", 8, 4 },
-  { D3DFMT_X4R4G4B4           , "X4R4G4B4", 4, 3 },
-  { D3DFMT_A2B10G10R10        , "A2B10G10R10", 10, 4 },
-  { D3DFMT_A8B8G8R8           , "A8B8G8R8", 8, 4 },
-  { D3DFMT_X8B8G8R8           , "X8B8G8R8", 8, 4 },
-  { D3DFMT_G16R16             , "G16R16", 16, 2 },
-  { D3DFMT_A2R10G10B10        , "A2R10G10B10", 10, 4 },
-  { D3DFMT_A16B16G16R16       , "A16B16G16R16", 16, 4 },
-  { D3DFMT_A8P8               , "A8P8", 8, 2 },
-  { D3DFMT_P8                 , "P8", 8, 1 },
-  { D3DFMT_L8                 , "L8", 8, 1 },
-  { D3DFMT_A8L8               , "A8L8", 8, 2 },
-  { D3DFMT_A4L4               , "A4L4", 4, 2 },
-  { D3DFMT_V8U8               , "V8U8", 8, 2 },
-  { D3DFMT_L6V5U5             , "L6V5U5", 6, 3 },
-  { D3DFMT_X8L8V8U8           , "X8L8V8U8", 8, 3 },
-  { D3DFMT_Q8W8V8U8           , "Q8W8V8U8", 8, 4 },
-  { D3DFMT_V16U16             , "V16U16", 16, 2 },
-  { D3DFMT_A2W10V10U10        , "A2W10V10U10", 10, 4 },
-  { D3DFMT_D16_LOCKABLE       , "D16_LOCKABLE", 16, 1 },
-  { D3DFMT_D32                , "D32", 32, 1 },
-  { D3DFMT_D15S1              , "D15S1", 15, 2 },
-  { D3DFMT_D24S8              , "D24S8", 24, 2 },
-  { D3DFMT_D24X8              , "D24X8", 24, 1 },
-  { D3DFMT_D24X4S4            , "D24X4S4", 24, 2 },
-  { D3DFMT_D16                , "D16", 16, 1 },
-  { D3DFMT_D32F_LOCKABLE      , "D32F_LOCKABLE", -23, 1 },
-  { D3DFMT_D24FS8             , "D24FS8", -23, 2 },
-  { D3DFMT_D32_LOCKABLE       , "D32_LOCKABLE", 32, 1 },
-  { D3DFMT_S8_LOCKABLE        , "S8_LOCKABLE", 8, 1 },
-  { D3DFMT_L16                , "L16", 16, 1 },
-  { D3DFMT_VERTEXDATA         , "VERTEXDATA", 0, 0 },
-  { D3DFMT_INDEX16            , "INDEX16", 16, 1 },
-  { D3DFMT_INDEX32            , "INDEX32", 32, 1 },
-  { D3DFMT_Q16W16V16U16       , "Q16W16V16U16", 16, 4 },
-  { D3DFMT_R16F               , "R16F", -10, 1 },
-  { D3DFMT_G16R16F            , "G16R16F", -10, 2 },
-  { D3DFMT_A16B16G16R16F      , "A16B16G16R16F", -10, 4 },
-  { D3DFMT_R32F               , "R32F", -23, 1 },
-  { D3DFMT_G32R32F            , "G32R32F", -23, 2 },
-  { D3DFMT_A32B32G32R32F      , "A32B32G32R32F", -23, 4 },
-  { D3DFMT_CxV8U8             , "CxV8U8", 8, 2 },
-  { D3DFMT_A1                 , "A1", 1, 1 },
-  { D3DFMT_A2B10G10R10_XR_BIAS, "A2B10G10R10_XR_BIAS", 10, 4 },
-  { D3DFMT_BINARYBUFFER       , "BINARYBUFFER", 0, 0 },
+  { D3DFMT_R8G8B8	      , "R8G8B8", 8, 3, false },
+  { D3DFMT_A8R8G8B8           , "A8R8G8B8", 8, 4, true },
+  { D3DFMT_X8R8G8B8           , "X8R8G8B8", 8, 4, false },
+  { D3DFMT_R5G6B5             , "R5G6B5", 6, 3, false },
+  { D3DFMT_X1R5G5B5           , "X1R5G5B5", 5, 3, false },
+  { D3DFMT_A1R5G5B5           , "A1R5G5B5", 5, 4, true },
+  { D3DFMT_A4R4G4B4           , "A4R4G4B4", 4, 4, true },
+  { D3DFMT_R3G3B2             , "R3G3B2", 3, 3, false },
+  { D3DFMT_A8                 , "A8", 8, 1, true },
+  { D3DFMT_A8R3G3B2           , "A8R3G3B2", 8, 4, true },
+  { D3DFMT_X4R4G4B4           , "X4R4G4B4", 4, 3, false },
+  { D3DFMT_A2B10G10R10        , "A2B10G10R10", 10, 4, true },
+  { D3DFMT_A8B8G8R8           , "A8B8G8R8", 8, 4, true },
+  { D3DFMT_X8B8G8R8           , "X8B8G8R8", 8, 4, true },
+  { D3DFMT_G16R16             , "G16R16", 16, 2, false },
+  { D3DFMT_A2R10G10B10        , "A2R10G10B10", 10, 4, true },
+  { D3DFMT_A16B16G16R16       , "A16B16G16R16", 16, 4, true },
+  { D3DFMT_A8P8               , "A8P8", 8, 2, true },
+  { D3DFMT_P8                 , "P8", 8, 1, false },
+  { D3DFMT_L8                 , "L8", 8, 1, false },
+  { D3DFMT_A8L8               , "A8L8", 8, 2, true },
+  { D3DFMT_A4L4               , "A4L4", 4, 2, true },
+  { D3DFMT_V8U8               , "V8U8", 8, 2, false },
+  { D3DFMT_L6V5U5             , "L6V5U5", 6, 3, false },
+  { D3DFMT_X8L8V8U8           , "X8L8V8U8", 8, 3, false },
+  { D3DFMT_Q8W8V8U8           , "Q8W8V8U8", 8, 4, false },
+  { D3DFMT_V16U16             , "V16U16", 16, 2, false },
+  { D3DFMT_A2W10V10U10        , "A2W10V10U10", 10, 4, true },
+  { D3DFMT_D16_LOCKABLE       , "D16_LOCKABLE", 16, 1, false },
+  { D3DFMT_D32                , "D32", 32, 1, false },
+  { D3DFMT_D15S1              , "D15S1", 15, 2, false },
+  { D3DFMT_D24S8              , "D24S8", 24, 2, false },
+  { D3DFMT_D24X8              , "D24X8", 24, 1, false },
+  { D3DFMT_D24X4S4            , "D24X4S4", 24, 2, false },
+  { D3DFMT_D16                , "D16", 16, 1, false },
+  { D3DFMT_D32F_LOCKABLE      , "D32F_LOCKABLE", -23, 1, false },
+  { D3DFMT_D24FS8             , "D24FS8", -23, 2, false },
+  { D3DFMT_D32_LOCKABLE       , "D32_LOCKABLE", 32, 1, false },
+  { D3DFMT_S8_LOCKABLE        , "S8_LOCKABLE", 8, 1, false },
+  { D3DFMT_L16                , "L16", 16, 1, false },
+  { D3DFMT_VERTEXDATA         , "VERTEXDATA", 0, 0, false },
+  { D3DFMT_INDEX16            , "INDEX16", 16, 1, false },
+  { D3DFMT_INDEX32            , "INDEX32", 32, 1, false },
+  { D3DFMT_Q16W16V16U16       , "Q16W16V16U16", 16, 4, false },
+  { D3DFMT_R16F               , "R16F", -10, 1, false },
+  { D3DFMT_G16R16F            , "G16R16F", -10, 2, false },
+  { D3DFMT_A16B16G16R16F      , "A16B16G16R16F", -10, 4, true },
+  { D3DFMT_R32F               , "R32F", -23, 1, false },
+  { D3DFMT_G32R32F            , "G32R32F", -23, 2, false },
+  { D3DFMT_A32B32G32R32F      , "A32B32G32R32F", -23, 4, true },
+  { D3DFMT_CxV8U8             , "CxV8U8", 8, 2, false },
+  { D3DFMT_A1                 , "A1", 1, 1, true },
+  { D3DFMT_A2B10G10R10_XR_BIAS, "A2B10G10R10_XR_BIAS", 10, 4, true },
+  { D3DFMT_BINARYBUFFER       , "BINARYBUFFER", 0, 0, false },
 
-  { D3DFMT_MULTI2_ARGB8       , "MULTI2_ARGB8", 8, 4 },
-  { D3DFMT_UYVY               , "UYVY", 8, 3 },
-  { D3DFMT_R8G8_B8G8          , "R8G8_B8G8", 8, 3 },
-  { D3DFMT_YUY2               , "YUY2", 8, 3 },
-  { D3DFMT_G8R8_G8B8          , "G8R8_G8B8", 8, 3 },
-  { D3DFMT_DXT1               , "DXT1", 8, 3 },
-  { D3DFMT_DXT2               , "DXT2", 8, 4 },
-  { D3DFMT_DXT3               , "DXT3", 8, 4 },
-  { D3DFMT_DXT4               , "DXT4", 8, 4 },
-  { D3DFMT_DXT5               , "DXT5", 8, 4 },
+  { D3DFMT_MULTI2_ARGB8       , "MULTI2_ARGB8", 8, 4, true },
+  { D3DFMT_UYVY               , "UYVY", 8, 3, false },
+  { D3DFMT_R8G8_B8G8          , "R8G8_B8G8", 8, 3, false },
+  { D3DFMT_YUY2               , "YUY2", 8, 3, false },
+  { D3DFMT_G8R8_G8B8          , "G8R8_G8B8", 8, 3, false },
+  { D3DFMT_DXT1               , "DXT1", 8, 4, true },
+  { D3DFMT_DXT2               , "DXT2", 8, 4, true },
+  { D3DFMT_DXT3               , "DXT3", 8, 4, true },
+  { D3DFMT_DXT4               , "DXT4", 8, 4, true },
+  { D3DFMT_DXT5               , "DXT5", 8, 4, true },
 
-  { (D3DFORMAT)MAKEFOURCC('I','N','T','Z'), "INTZ", 24, 2 },
-  { (D3DFORMAT)MAKEFOURCC('D','F','2','4'), "DF24", -23, 2 },
-  { (D3DFORMAT)MAKEFOURCC('D','F','1','6'), "DF16", -10, 2 },
-  { (D3DFORMAT)MAKEFOURCC('R','A','W','Z'), "RAWZ", -23, 2 },
+  { (D3DFORMAT)MAKEFOURCC('I','N','T','Z'), "INTZ", 24, 2, false },
+  { (D3DFORMAT)MAKEFOURCC('D','F','2','4'), "DF24", -23, 2, false },
+  { (D3DFORMAT)MAKEFOURCC('D','F','1','6'), "DF16", -10, 2, false },
+  { (D3DFORMAT)MAKEFOURCC('R','A','W','Z'), "RAWZ", -23, 2, false },
 
-  { (D3DFORMAT)MAKEFOURCC('A','T','I','1'), "ATI1", 8, 1 },
-  { (D3DFORMAT)MAKEFOURCC('A','T','I','2'), "ATI2", 8, 2 },
+  { (D3DFORMAT)MAKEFOURCC('A','T','I','1'), "ATI1", 8, 1, false },
+  { (D3DFORMAT)MAKEFOURCC('A','T','I','2'), "ATI2", 8, 2, false },
 
 };
 
@@ -2381,6 +2574,15 @@ char findFormatChannels(D3DFORMAT fmt) {
   for (int g = 0; g < (sizeof(formatDatabase) / sizeof(formatID)); g++) {
     if (formatDatabase[g].fmt == fmt)
       return formatDatabase[g].channels;
+  }
+
+  return 0;
+}
+
+bool findAlpha(D3DFORMAT fmt) {
+  for (int g = 0; g < (sizeof(formatDatabase) / sizeof(formatID)); g++) {
+    if (formatDatabase[g].fmt == fmt)
+      return formatDatabase[g].alpha;
   }
 
   return 0;

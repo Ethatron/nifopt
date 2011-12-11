@@ -21,11 +21,14 @@
 bool geotoprimitive = false;
 bool stripstolists = false;
 bool optimizehavok = false;
+bool optimizesmmopp = false;
+bool optimizemmmopp = false;
 bool optimizelists = false;
 bool optimizeparts = false;
 bool optimizekeys = false;
 bool optimizequick = false;
 bool optimizetexts = false;
+bool optimizefar = false;
 bool barestripfar = false;
 bool parallaxmapping = false;
 bool texturepaths = true;
@@ -33,11 +36,13 @@ bool reattachnodes = true;
 bool droptrimeshes = false;
 bool dropextras = false;
 bool skiphashcheck = false;
+bool skipmodels = false;
 bool skipimages = false;
 bool skipsounds = false;
 bool skipexisting = false;
 bool skipnewer = false;
 bool skipprocessing = false;
+bool processhidden = false;
 bool passthrough = false;
 bool simulation = false;
 bool datamining = false;
@@ -173,13 +178,14 @@ int normalsteepness = 1;
 
 int fixedtexts = 0;
 int modifiedtexts = 0;
+int planartexts = 0;
 int changedformats = 0;
 
 #include "nifopt-tex.cpp"
 
 #define	TEXTUREOPT
 #ifdef	TEXTUREOPT
-bool process_dds(const char *inname, const char *ouname, const char *rep) {
+bool ProcessDDS(const char *inname, const char *ouname, const char *rep) {
     /* read the DDS */
     void *inmem = NULL, *oumem = NULL;
     UINT insize =    0, ousize =    0;
@@ -198,8 +204,14 @@ bool process_dds(const char *inname, const char *ouname, const char *rep) {
     if ((file = ioopenfile(inname, "rb"))) {
       inmem = malloc(insize = (UINT)info.io_size);
 
+      UINT rdsze = (UINT)
       ioreadfile(inmem, insize, file);
       ioclosefile(file);
+
+      if (rdsze != insize) {
+	errprintf(stderr, "can't read the DDS\n");
+	return false;
+      }
     }
     else {
       errprintf(stderr, "can't read the DDS\n");
@@ -213,12 +225,15 @@ bool process_dds(const char *inname, const char *ouname, const char *rep) {
 
       /* extract levels the hard way (if there is 0 in the file, make it 1) */
       int mipl = 1;
-      if (((DWORD *)inmem)[0] == MAKEFOURCC('D', 'D', 'S', ' '))
-	mipl = ((DWORD *)inmem)[7];
+      if (((DDS_HEADER *)inmem)->dwMagicNumber == MAKEFOURCC('D', 'D', 'S', ' '))
+	mipl = ((DDS_HEADER *)inmem)->dwMipMapCount;
       if (!mipl)
 	mipl = 1;
 
-      if ((res = D3DXCreateTextureFromFileInMemoryEx(
+      /* with depth: cube or volume */
+      if (((DDS_HEADER *)inmem)->dwHeaderFlags & 0x00800000U)
+	;//addnote(" Texture has unsupported format (cubic or volumetric).\n");
+      else if ((res = D3DXCreateTextureFromFileInMemoryEx(
 	pD3DDevice, inmem, insize,
 	D3DX_DEFAULT, D3DX_DEFAULT, mipl/*D3DX_DEFAULT*/,
 	0, D3DFMT_UNKNOWN, D3DPOOL_MANAGED, D3DX_FILTER_NONE/*D3DX_DEFAULT*/,
@@ -264,11 +279,6 @@ bool process_dds(const char *inname, const char *ouname, const char *rep) {
 	  }
 	}
 
-	if (levels > levelc)
-	  addnote(" Missing %d mip-level(s) complemented.\n", levels - levelc);
-	else if (levels < levelc)
-	  addnote(" Excess of %d mip-level(s) removed.\n", levelc - levels);
-
 	if ((based.Format != D3DFMT_DXT1) &&
 	    (based.Format != D3DFMT_DXT2) &&
 	    (based.Format != D3DFMT_DXT3) &&
@@ -284,11 +294,17 @@ bool process_dds(const char *inname, const char *ouname, const char *rep) {
 	    (based.Format == D3DFMT_CxV8U8))
 	  unsupported = true;
 
-	if (unsupported)
-	  addnote(" Texture has unsupported format.\n"), fixedtexts++;
+	/**/ if (base->GetType() == D3DRTYPE_VOLUMETEXTURE)
+	  unsupported = true, levels = levelc;
+	else if (base->GetType() == D3DRTYPE_CUBETEXTURE)
+	  unsupported = true, levels = levelc;
+	else if (base->GetType() != D3DRTYPE_TEXTURE)
+	  unsupported = true;
 
 	/* file-size sanity check */
-	if (levelc > 1) {
+	if (unsupported)
+	  addnote(" Texture has unsupported format.\n");
+	else if (levelc > 1) {
 	  unsigned int bsize = 0;
 	  switch (based.Format) {
 	    case D3DFMT_DXT5:
@@ -324,7 +340,7 @@ bool process_dds(const char *inname, const char *ouname, const char *rep) {
 	  }
 
 	  if (bsize > insize)
-	    addnote(" Truncated texture found, fixed!\n");
+	    addnote(" Truncated texture found, fixed!\n"), fixedtexts++;
 	}
 
 	/* choose what to do */
@@ -356,6 +372,7 @@ bool process_dds(const char *inname, const char *ouname, const char *rep) {
 	  if (dooptcomp) {
 	    /* normal maps */
 	    if (issuf(inname, "_n") ||
+		issuf(inname, "_fn") ||
 		issuf(inname, "_xyz") ||
 		issuf(inname, "_xyzd")) {
 	      /* only known object-space normal-maps */
@@ -393,6 +410,8 @@ bool process_dds(const char *inname, const char *ouname, const char *rep) {
 		unknown = true;
 
 	      newsuf = "_n";
+	      if (issuf(inname, "_fn"))
+		newsuf = "_fn";
 	    }
 	    /* glow maps (l/rgb-only) */
 	    else if (issuf(inname, "_g")) {
@@ -468,6 +487,7 @@ bool process_dds(const char *inname, const char *ouname, const char *rep) {
 	  if (!dooptcomp || (!success && unknown)) {
 	    /* normal maps */
 	    if (issuf(inname, "_n") ||
+		issuf(inname, "_fn") ||
 		issuf(inname, "_xyz") ||
 		issuf(inname, "_xyzd")) {
 	      /* only known object-space normal-maps */
@@ -505,6 +525,8 @@ bool process_dds(const char *inname, const char *ouname, const char *rep) {
 		unknown = true;
 
 	      newsuf = "_n";
+	      if (issuf(inname, "_fn"))
+		newsuf = "_fn";
 	    }
 	    /* glow maps (l/rgb-only) */
 	    else if (issuf(inname, "_g")) {
@@ -592,7 +614,7 @@ bool process_dds(const char *inname, const char *ouname, const char *rep) {
 	  nfoprintf(stdout, "processing:\n");
 
 	  /* normal maps */
-	  if (issuf(inname, "_n"))
+	  if (issuf(inname, "_n") || issuf(inname, "_fn"))
 	    ;
 	  /* glow maps */
 	  else if (issuf(inname, "_g"))
@@ -637,6 +659,23 @@ bool process_dds(const char *inname, const char *ouname, const char *rep) {
 	  /* read changed information in */
 	  base->GetLevelDesc(0, &based);
 
+	  /* recalculate levels after conversion */
+	  int levels = 1; {
+	    int ww = based.Width;
+	    int hh = based.Height;
+	    while ((ww > 1) && (hh > 1)) {
+	      ww = (ww + 1) >> 1;
+	      hh = (hh + 1) >> 1;
+
+	      levels++;
+	    }
+	  }
+
+	  if (levels > levelc)
+	    addnote(" Missing %d mip-level(s) complemented.\n", levels - levelc);
+	  else if (levels < levelc)
+	    addnote(" Excess of %d mip-level(s) removed.\n", levelc - levels);
+
 	  if (((based.Format != D3DFMT_DXT1) &&
 	       (based.Format != D3DFMT_DXT2) &&
 	       (based.Format != D3DFMT_DXT3) &&
@@ -653,8 +692,11 @@ bool process_dds(const char *inname, const char *ouname, const char *rep) {
 	       (based.Format == D3DFMT_ATI1) ||
 	       (based.Format == D3DFMT_ATI2)) && uncompressed)
 	    addnote(" Texture was uncompressed.\n");
+
 	  if (oldFormat != based.Format)
 	    changedformats++;
+	  if ((based.Width == 1) && (based.Height == 1))
+	    planartexts++;
 
 	  nfoprintf(stdout, " Format           : %s to %s\n", from, findFormat(based.Format));
 	  nfoprintf(stdout, " Dimensions       : %dx%d - %d to %d levels\n", based.Width, based.Height, levelc, levels);
@@ -667,6 +709,9 @@ bool process_dds(const char *inname, const char *ouname, const char *rep) {
 
 	  oumem  = oubuf->GetBufferPointer();
 	  ousize = oubuf->GetBufferSize();
+
+	  /* mark the file to have been optimized */
+	  ((DDS_HEADER *)oumem)->dwReserved1[0] = MAKEFOURCC('N', 'O', '0', '1');
 	}
 
 	notes.clear();
@@ -1078,7 +1123,7 @@ vector<NiObjectRef> masterlist;
 NiObjectRef masterroot;
 NifInfo masterinfo;
 
-string find_controller(NiInterpolatorRef interp) {
+string FindController(NiInterpolatorRef interp) {
   vector<NiObjectRef>::iterator walk;
 
   for (walk = masterlist.begin(); walk != masterlist.end(); walk++) {
@@ -1126,7 +1171,7 @@ string find_controller(NiInterpolatorRef interp) {
   return "";
 }
 
-void substitute_refs(NiObjectRef newref, NiObjectRef oldref) {
+void SubstituteRefs(NiObjectRef newref, NiObjectRef oldref) {
   vector<NiObjectRef>::iterator walk;
 
   /* substitute geometry-references */
@@ -1232,6 +1277,7 @@ void substitute_refs(NiObjectRef newref, NiObjectRef oldref) {
 /* ---------------------------------------------------- */
 
 #include "nifopt-geometry.C"
+//#include "nifopt-nmbaker.C"
 #include "nifopt-tri.C"
 #include "nifopt-egm.C"
 
@@ -1259,7 +1305,7 @@ bool nodemopped = false;
 //bhkShape.bhkTransformShape.bhkConvexTransformShape
 //bhkShape.bhkBvTreeShape.bhkMoppBvTreeShape
 
-string convert_node(bhkNiTriStripsShapeRef node, NiNodeRef parent, NiObjectRef &subst) {
+string ConvertNode(bhkNiTriStripsShapeRef node, NiNodeRef parent, NiObjectRef &subst) {
 #define TRISTRIPSSHAPE_FACTOR	7.0f
 #define BOXSHAPE_TOLERANCE	0.20f	// must be way up sadly, was 0.05f
 #define HULLSHAPE_TOLERANCE	0.20f	// must be way up sadly, was 0.05f
@@ -1493,7 +1539,7 @@ string convert_node(bhkNiTriStripsShapeRef node, NiNodeRef parent, NiObjectRef &
     }
 
     /* replace references everywhere */
-    substitute_refs(DynamicCast<NiObject>(lnode), DynamicCast<NiObject>(node));
+    SubstituteRefs(DynamicCast<NiObject>(lnode), DynamicCast<NiObject>(node));
 
     /* replace node (without having the ability directly) */
     subst = DynamicCast<NiObject>(lnode);
@@ -1506,7 +1552,7 @@ string convert_node(bhkNiTriStripsShapeRef node, NiNodeRef parent, NiObjectRef &
     nfoprintf(stdout, " Collision Shapes : %s to %s\n", "Strips", "Primitive");
 
     /* replace references everywhere */
-    substitute_refs(DynamicCast<NiObject>(nnode), DynamicCast<NiObject>(node));
+    SubstituteRefs(DynamicCast<NiObject>(nnode), DynamicCast<NiObject>(node));
 
     /* replace node (without having the ability directly) */
     subst = DynamicCast<NiObject>(nnode);
@@ -1595,6 +1641,7 @@ string convert_node(bhkNiTriStripsShapeRef node, NiNodeRef parent, NiObjectRef &
 	offset += vc;
       }
 
+      /* single sub-shape MOPP */
       os[0].layer = OL_STATIC;//node->GetOblivionLayer(0);
       os[0].colFilter = 0;//node->GetOblivionFilter(0);
       os[0].unknownShort = 0;
@@ -1689,7 +1736,7 @@ string convert_node(bhkNiTriStripsShapeRef node, NiNodeRef parent, NiObjectRef &
       nnode->SetShape(pnode);
 
       /* replace references everywhere */
-      substitute_refs(DynamicCast<NiObject>(nnode), DynamicCast<NiObject>(node));
+      SubstituteRefs(DynamicCast<NiObject>(nnode), DynamicCast<NiObject>(node));
 
       /* replace node (without having the ability directly) */
       subst = DynamicCast<NiObject>(nnode);
@@ -1701,7 +1748,7 @@ string convert_node(bhkNiTriStripsShapeRef node, NiNodeRef parent, NiObjectRef &
   return node->GetType().GetTypeName();
 }
 
-string convert_node(bhkPackedNiTriStripsShapeRef node, NiNodeRef parent, NiObjectRef &subst) {
+string ConvertNode(bhkPackedNiTriStripsShapeRef node, NiNodeRef parent, NiObjectRef &subst) {
 #define PACKEDTRISTRIPSSHAPE_FACTOR 1.0f
   /* check supported version-number */
   if ((masterinfo.userVersion >= 10) &&
@@ -1778,14 +1825,14 @@ string convert_node(bhkPackedNiTriStripsShapeRef node, NiNodeRef parent, NiObjec
      * and then to a ConvexVerticesShape
      */
     NiObjectRef nsubst = DynamicCast<NiObject>(nnode);
-    string type = convert_node(nnode, NULL, nsubst);
+    string type = ConvertNode(nnode, NULL, nsubst);
     if ((type != "bhkNiTriStripsShape") &&
         (type != "bhkPackedNiTriStripsShape") &&
         (type != "bhkMoppBvTreeShape")) {
 //    nfoprintf(stdout, " Collision Shapes : %s to %s\n", "PackedStrips", "Strips");
 
       /* replace references everywhere */
-      substitute_refs(DynamicCast<NiObject>(nsubst), DynamicCast<NiObject>(node));
+      SubstituteRefs(DynamicCast<NiObject>(nsubst), DynamicCast<NiObject>(node));
 
       /* replace node (without having the ability directly) */
       subst = DynamicCast<NiObject>(nsubst);
@@ -1794,7 +1841,7 @@ string convert_node(bhkPackedNiTriStripsShapeRef node, NiNodeRef parent, NiObjec
     }
     /* revert the change and put the original object back */
     else {
-      substitute_refs(DynamicCast<NiObject>(node), DynamicCast<NiObject>(nsubst));
+      SubstituteRefs(DynamicCast<NiObject>(node), DynamicCast<NiObject>(nsubst));
     }
 
     /* failure, Packed inside a MOPP is always faster */
@@ -1806,7 +1853,7 @@ string convert_node(bhkPackedNiTriStripsShapeRef node, NiNodeRef parent, NiObjec
   return node->GetType().GetTypeName();
 }
 
-string convert_node(bhkMoppBvTreeShapeRef node, NiNodeRef parent, NiObjectRef &subst) {
+string ConvertNode(bhkMoppBvTreeShapeRef node, NiNodeRef parent, NiObjectRef &subst) {
   assert((nodemotion == MO_SYS_FIXED) || (nodemotion == MO_SYS_KEYFRAMED));
   nodemopped = true;
 
@@ -1835,12 +1882,12 @@ string convert_node(bhkMoppBvTreeShapeRef node, NiNodeRef parent, NiObjectRef &s
      */
     if (unpack) {
       /* MOPP is gone */
-      string type = convert_node(unpack, NULL, sobj);
+      string type = ConvertNode(unpack, NULL, sobj);
       if (type != "bhkNiTriStripsShape") {
 	addnote(" Dropped MOPP-Node\n");
 
 	/* replace references everywhere */
-	substitute_refs(DynamicCast<NiObject>(sobj), DynamicCast<NiObject>(node));
+	SubstituteRefs(DynamicCast<NiObject>(sobj), DynamicCast<NiObject>(node));
 
 	/* replace node (without having the ability directly) */
 	subst = DynamicCast<NiObject>(sobj);
@@ -1851,12 +1898,12 @@ string convert_node(bhkMoppBvTreeShapeRef node, NiNodeRef parent, NiObjectRef &s
     }
     else if (pack) {
       /* MOPP is gone */
-      string type = convert_node(pack, NULL, sobj);
+      string type = ConvertNode(pack, NULL, sobj);
       if (type != "bhkPackedNiTriStripsShape") {
 	addnote(" Dropped MOPP-Node\n");
 
 	/* replace references everywhere */
-	substitute_refs(DynamicCast<NiObject>(sobj), DynamicCast<NiObject>(node));
+	SubstituteRefs(DynamicCast<NiObject>(sobj), DynamicCast<NiObject>(node));
 
 	/* replace node (without having the ability directly) */
 	subst = DynamicCast<NiObject>(sobj);
@@ -1871,7 +1918,7 @@ string convert_node(bhkMoppBvTreeShapeRef node, NiNodeRef parent, NiObjectRef &s
   return node->GetType().GetTypeName();
 }
 
-string convert_node(NiTriStripsRef node, NiNodeRef parent, NiObjectRef &subst) {
+string ConvertNode(NiTriStripsRef node, NiNodeRef parent, NiObjectRef &subst) {
   NiGeometryDataRef raw = node->GetData();
   NiTriStripsDataRef data = DynamicCast<NiTriStripsData>(raw);
 
@@ -2067,7 +2114,7 @@ string convert_node(NiTriStripsRef node, NiNodeRef parent, NiObjectRef &subst) {
     skn->SetSkinData(NULL);
 
     /* replace references everywhere */
-    substitute_refs(DynamicCast<NiObject>(nskn), DynamicCast<NiObject>(skn));
+    SubstituteRefs(DynamicCast<NiObject>(nskn), DynamicCast<NiObject>(skn));
   }
 
   nnode->SetCollisionMode(node->GetCollisionMode());
@@ -2103,7 +2150,7 @@ string convert_node(NiTriStripsRef node, NiNodeRef parent, NiObjectRef &subst) {
   }
 
   /* replace references everywhere */
-  substitute_refs(DynamicCast<NiObject>(nnode), DynamicCast<NiObject>(node));
+  SubstituteRefs(DynamicCast<NiObject>(nnode), DynamicCast<NiObject>(node));
 
   /* replace node (without having the ability directly) */
   subst = DynamicCast<NiObject>(nnode);
@@ -2111,7 +2158,7 @@ string convert_node(NiTriStripsRef node, NiNodeRef parent, NiObjectRef &subst) {
   return nnode->GetType().GetTypeName();
 }
 
-string convert_node(NiTriShapeRef node, NiNodeRef parent, NiObjectRef &subst) {
+string ConvertNode(NiTriShapeRef node, NiNodeRef parent, NiObjectRef &subst) {
   NiGeometryDataRef raw = node->GetData();
   NiTriShapeDataRef data = DynamicCast<NiTriShapeData>(raw);
 
@@ -2351,9 +2398,9 @@ K tcb(float t, Key<K> oo, Key<K> o, Key<K> p, Key<K> q, Key<K> qq) {
 /* . . . . . . . . . . . . . . . . . . . . . . . . . .  */
 
 template<typename K>
-int optimize_keys(KeyType ip, vector< Key<K> > &keys);
+int OptimizeKeys(KeyType ip, vector< Key<K> > &keys);
 template<typename K>
-int optimize_keys(KeyType ip, vector< Key<K> > &keys, float round) {
+int OptimizeKeys(KeyType ip, vector< Key<K> > &keys, float round) {
   int kc = (int)keys.size();
 
   /* linear interpolator */
@@ -2399,7 +2446,7 @@ int optimize_keys(KeyType ip, vector< Key<K> > &keys, float round) {
 
 #define Q Niflib::Quaternion
 template<>
-int optimize_keys<Q>(KeyType ip, vector< Key<Q> > &keys, float round) {
+int OptimizeKeys<Q>(KeyType ip, vector< Key<Q> > &keys, float round) {
   int kc = (int)keys.size();
 
   /* linear interpolator */
@@ -2453,7 +2500,7 @@ int optimize_keys<Q>(KeyType ip, vector< Key<Q> > &keys, float round) {
 
 #define B unsigned char
 template<>
-int optimize_keys<B>(KeyType ip, vector< Key<B> > &keys) {
+int OptimizeKeys<B>(KeyType ip, vector< Key<B> > &keys) {
   int kc = (int)keys.size();
   if (kc < 3)
     return 0;
@@ -2484,7 +2531,7 @@ int optimize_keys<B>(KeyType ip, vector< Key<B> > &keys) {
 
 #define S string
 template<>
-int optimize_keys<S>(KeyType ip, vector< Key<S> > &keys) {
+int OptimizeKeys<S>(KeyType ip, vector< Key<S> > &keys) {
   int kc = (int)keys.size();
   if (kc < 2)
     return 0;
@@ -2514,7 +2561,7 @@ int optimize_keys<S>(KeyType ip, vector< Key<S> > &keys) {
 }
 #undef	S
 
-string optimize_node(NiTextKeyExtraDataRef node) {
+string OptimizeNode(NiTextKeyExtraDataRef node) {
   vector< Key<string> > keys;
   int kd;
 
@@ -2527,7 +2574,7 @@ string optimize_node(NiTextKeyExtraDataRef node) {
   nfoprintf(stdout, " Type             : %s\n", "Text");
   nfoprintf(stdout, " Interpolation    : %s\n", "Step");
 
-  if ((kd = optimize_keys(LINEAR_KEY, keys)))
+  if ((kd = OptimizeKeys(LINEAR_KEY, keys)))
     node->SetKeys(keys), modifiedtlines++;
 
   nfoprintf(stdout, " Keys             : %6d to %6d (%.4f%%)\n", (int)keys.size() + kd, (int)keys.size(), 100.0f * keys.size() / ((int)keys.size() + kd));
@@ -2535,7 +2582,7 @@ string optimize_node(NiTextKeyExtraDataRef node) {
   return node->GetType().GetTypeName();
 }
 
-string optimize_node(NiBoolDataRef node) {
+string OptimizeNode(NiBoolDataRef node) {
   vector< Key<unsigned char> > keys;
   KeyType ip;
   int kd;
@@ -2550,7 +2597,7 @@ string optimize_node(NiBoolDataRef node) {
   nfoprintf(stdout, " Type             : %s\n", "Boolean");
   nfoprintf(stdout, " Interpolation    : %s\n", KeyName[ip]);
 
-  if ((kd = optimize_keys(ip, keys)))
+  if ((kd = OptimizeKeys(ip, keys)))
     node->SetKeys(keys), modifiedtlines++;
 
   nfoprintf(stdout, " Keys             : %6d to %6d (%.4f%%)\n", (int)keys.size() + kd, (int)keys.size(), 100.0f * keys.size() / ((int)keys.size() + kd));
@@ -2558,7 +2605,7 @@ string optimize_node(NiBoolDataRef node) {
   return node->GetType().GetTypeName();
 }
 
-string optimize_node(NiVisDataRef node) {
+string OptimizeNode(NiVisDataRef node) {
   vector< Key<unsigned char> > keys;
   int kd;
 
@@ -2571,7 +2618,7 @@ string optimize_node(NiVisDataRef node) {
   nfoprintf(stdout, " Type             : %s\n", "Vis");
   nfoprintf(stdout, " Interpolation    : %s\n", KeyName[LINEAR_KEY]);
 
-  if ((kd = optimize_keys(LINEAR_KEY, keys, 0.5f)))
+  if ((kd = OptimizeKeys(LINEAR_KEY, keys, 0.5f)))
     node->SetKeys(keys), modifiedtlines++;
 
   nfoprintf(stdout, " Keys             : %6d to %6d (%.4f%%)\n", (int)keys.size() + kd, (int)keys.size(), 100.0f * keys.size() / ((int)keys.size() + kd));
@@ -2579,7 +2626,7 @@ string optimize_node(NiVisDataRef node) {
   return node->GetType().GetTypeName();
 }
 
-string optimize_node(NiMorphDataRef node) {
+string OptimizeNode(NiMorphDataRef node) {
   vector< Key<float> > keys;
   KeyType ip;
   int kd, mc, m;
@@ -2596,7 +2643,7 @@ string optimize_node(NiMorphDataRef node) {
 
     nfoprintf(stdout, " Interpolation %2d : %s\n", m, KeyName[ip]);
 
-    if ((kd = optimize_keys(ip, keys, 0.0f)))
+    if ((kd = OptimizeKeys(ip, keys, 0.0f)))
       node->SetMorphKeys(m, keys), modifiedtlines++;
 
     nfoprintf(stdout, " Keys %2d          : %6d to %6d (%.4f%%)\n", (int)keys.size() + kd, (int)keys.size(), 100.0f * keys.size() / ((int)keys.size() + kd));
@@ -2605,7 +2652,7 @@ string optimize_node(NiMorphDataRef node) {
   return node->GetType().GetTypeName();
 }
 
-string optimize_node(NiColorDataRef node) {
+string OptimizeNode(NiColorDataRef node) {
   vector< Key<Color4> > keys;
   KeyType ip;
   size_t kd;
@@ -2620,7 +2667,7 @@ string optimize_node(NiColorDataRef node) {
   nfoprintf(stdout, " Type             : %s\n", "Color");
   nfoprintf(stdout, " Interpolation    : %s\n", KeyName[ip]);
 
-  if ((kd = optimize_keys(ip, keys, 0.0f)))
+  if ((kd = OptimizeKeys(ip, keys, 0.0f)))
     node->SetKeys(keys), modifiedtlines++;
 
   nfoprintf(stdout, " Keys             : %6d to %6d (%.4f%%)\n", (int)keys.size() + kd, (int)keys.size(), 100.0f * keys.size() / ((int)keys.size() + kd));
@@ -2628,7 +2675,7 @@ string optimize_node(NiColorDataRef node) {
   return node->GetType().GetTypeName();
 }
 
-string optimize_node(NiFloatDataRef node) {
+string OptimizeNode(NiFloatDataRef node) {
   vector< Key<float> > keys;
   KeyType ip;
   size_t kd;
@@ -2643,7 +2690,7 @@ string optimize_node(NiFloatDataRef node) {
   nfoprintf(stdout, " Type             : %s\n", "Float");
   nfoprintf(stdout, " Interpolation    : %s\n", KeyName[ip]);
 
-  if ((kd = optimize_keys(ip, keys, 0.0f)))
+  if ((kd = OptimizeKeys(ip, keys, 0.0f)))
     node->SetKeys(keys), modifiedtlines++;
 
   nfoprintf(stdout, " Keys             : %6d to %6d (%.4f%%)\n", (int)keys.size() + kd, (int)keys.size(), 100.0f * keys.size() / ((int)keys.size() + kd));
@@ -2651,7 +2698,7 @@ string optimize_node(NiFloatDataRef node) {
   return node->GetType().GetTypeName();
 }
 
-string optimize_node(NiPosDataRef node) {
+string OptimizeNode(NiPosDataRef node) {
   vector< Key<Vector3> > keys;
   KeyType ip;
   int kd;
@@ -2666,7 +2713,7 @@ string optimize_node(NiPosDataRef node) {
   nfoprintf(stdout, " Type             : %s\n", "Position");
   nfoprintf(stdout, " Interpolation    : %s\n", KeyName[ip]);
 
-  if ((kd = optimize_keys(ip, keys, 0.0f)))
+  if ((kd = OptimizeKeys(ip, keys, 0.0f)))
     node->SetKeys(keys), modifiedtlines++;
 
   nfoprintf(stdout, " Keys             : %6d to %6d (%.4f%%)\n", (int)keys.size() + kd, (int)keys.size(), 100.0f * keys.size() / ((int)keys.size() + kd));
@@ -2674,7 +2721,7 @@ string optimize_node(NiPosDataRef node) {
   return node->GetType().GetTypeName();
 }
 
-string optimize_node(NiKeyframeDataRef node) {
+string OptimizeNode(NiKeyframeDataRef node) {
   vector< Key<Quaternion> > keysq;
   vector< Key<float> > keysx;
   vector< Key<float> > keysy;
@@ -2699,7 +2746,7 @@ string optimize_node(NiKeyframeDataRef node) {
     nfoprintf(stdout, " Type             : %s\n", "Quaternion-Rotation");
     nfoprintf(stdout, " Interpolation    : %s\n", KeyName[ipq]);
 
-    if ((kd = optimize_keys(ipq, keysq, 0.0f)))
+    if ((kd = OptimizeKeys(ipq, keysq, 0.0f)))
       node->SetQuatRotateKeys(keysq), modifiedtlines++;
 
     nfoprintf(stdout, " Keys             : %6d to %6d (%.4f%%)\n", (int)keysq.size() + kd, (int)keysq.size(), 100.0f * keysq.size() / ((int)keysq.size() + kd));
@@ -2711,7 +2758,7 @@ string optimize_node(NiKeyframeDataRef node) {
     nfoprintf(stdout, " Type             : %s\n", "Euler-Rotation X");
     nfoprintf(stdout, " Interpolation    : %s\n", KeyName[ipx]);
 
-    if ((kd = optimize_keys(ipx, keysx, 0.0f)))
+    if ((kd = OptimizeKeys(ipx, keysx, 0.0f)))
       node->SetXRotateKeys(keysx), modifiedtlines++;
 
     nfoprintf(stdout, " Keys             : %6d to %6d (%.4f%%)\n", (int)keysx.size() + kd, (int)keysx.size(), 100.0f * keysx.size() / ((int)keysx.size() + kd));
@@ -2723,7 +2770,7 @@ string optimize_node(NiKeyframeDataRef node) {
     nfoprintf(stdout, " Type             : %s\n", "Euler-Rotation Y");
     nfoprintf(stdout, " Interpolation    : %s\n", KeyName[ipy]);
 
-    if ((kd = optimize_keys(ipy, keysy, 0.0f)))
+    if ((kd = OptimizeKeys(ipy, keysy, 0.0f)))
       node->SetYRotateKeys(keysy), modifiedtlines++;
 
     nfoprintf(stdout, " Keys             : %6d to %6d (%.4f%%)\n", (int)keysy.size() + kd, (int)keysy.size(), 100.0f * keysy.size() / ((int)keysy.size() + kd));
@@ -2735,7 +2782,7 @@ string optimize_node(NiKeyframeDataRef node) {
     nfoprintf(stdout, " Type             : %s\n", "Euler-Rotation Z");
     nfoprintf(stdout, " Interpolation    : %s\n", KeyName[ipz]);
 
-    if ((kd = optimize_keys(ipz, keysz, 0.0f)))
+    if ((kd = OptimizeKeys(ipz, keysz, 0.0f)))
       node->SetZRotateKeys(keysz), modifiedtlines++;
 
     nfoprintf(stdout, " Keys             : %6d to %6d (%.4f%%)\n", (int)keysz.size() + kd, (int)keysz.size(), 100.0f * keysz.size() / ((int)keysz.size() + kd));
@@ -2747,7 +2794,7 @@ string optimize_node(NiKeyframeDataRef node) {
     nfoprintf(stdout, " Type             : %s\n", "Translation");
     nfoprintf(stdout, " Interpolation    : %s\n", KeyName[ipt]);
 
-    if ((kd = optimize_keys(ipt, keyst, 0.0f)))
+    if ((kd = OptimizeKeys(ipt, keyst, 0.0f)))
       node->SetTranslateKeys(keyst), modifiedtlines++;
 
     nfoprintf(stdout, " Keys             : %6d to %6d (%.4f%%)\n", (int)keyst.size() + kd, (int)keyst.size(), 100.0f * keyst.size() / ((int)keyst.size() + kd));
@@ -2759,7 +2806,7 @@ string optimize_node(NiKeyframeDataRef node) {
     nfoprintf(stdout, " Type             : %s\n", "Scale");
     nfoprintf(stdout, " Interpolation    : %s\n", KeyName[ips]);
 
-    if ((kd = optimize_keys(ips, keyss, 0.0f)))
+    if ((kd = OptimizeKeys(ips, keyss, 0.0f)))
       node->SetScaleKeys(keyss), modifiedtlines++;
 
     nfoprintf(stdout, " Keys             : %6d to %6d (%.4f%%)\n", (int)keyss.size() + kd, (int)keyss.size(), 100.0f * keyss.size() / ((int)keyss.size() + kd));
@@ -2770,7 +2817,7 @@ string optimize_node(NiKeyframeDataRef node) {
 
 /* - - - - - - - - - - - - - - - - - - - - - - - - - -  */
 
-string optimize_node(bhkNiTriStripsShapeRef node) {
+string OptimizeNode(bhkNiTriStripsShapeRef node) {
   int sd = node->GetNumStripsData();
   /* no need for collision-node */
   if (!sd)
@@ -2853,12 +2900,12 @@ string optimize_node(bhkNiTriStripsShapeRef node) {
 	/* the collector considers the entire data-set of a vertex
 	 * to determine "unique" vertices
 	 */
-	rcollect_face(&tri);
+	CollectFace(&tri);
       }
     }
 
-    rcalculate_faces();
-    rassignsector_faces((int)v.size());
+    CalculateGeometryNormals();
+    IndexGeometry((int)v.size());
 
     {
       set<class objVertex *, struct V>::iterator itv;
@@ -2900,7 +2947,7 @@ string optimize_node(bhkNiTriStripsShapeRef node) {
       nfoprintf(stdout, " Faces %2d         : %6d to %6d (%.4f%%)\n", ss, f.size(), _f.size(), 100.0f * _f.size() / f.size());
     }
 
-    free_faces();
+    FreeGeometry();
   }
 
   if (degeneratevertx || degeneratefaces) {
@@ -2915,7 +2962,7 @@ string optimize_node(bhkNiTriStripsShapeRef node) {
   return node->GetType().GetTypeName();
 }
 
-string optimize_node(bhkPackedNiTriStripsShapeRef node) {
+string OptimizeNode(bhkPackedNiTriStripsShapeRef node) {
   /* check supported version-number */
   if ((masterinfo.userVersion >= 10) &&
       (masterinfo.userVersion <= 11) &&
@@ -3063,15 +3110,15 @@ string optimize_node(bhkPackedNiTriStripsShapeRef node) {
       /* the collector considers the entire data-set of a vertex
        * to determine "unique" vertices
        */
-      rcollect_face(&tri);
+      CollectFace(&tri);
 
       /* count cluster-faces */
       fb[tri.p1.groupid]++;
     }
   }
 
-  rcalculate_faces();
-  rassignsector_faces((int)v.size());
+  CalculateGeometryNormals();
+  IndexGeometry((int)v.size());
 
   {
     set<class objVertex *, struct V>::iterator itv;
@@ -3169,7 +3216,7 @@ string optimize_node(bhkPackedNiTriStripsShapeRef node) {
     // 0x14000004, 0x14000005
     node->SetSubShapes(os);
 
-  free_faces();
+  FreeGeometry();
 
   if (degeneratevertx || degeneratefaces) {
     if (degeneratevertx && !degeneratefaces)
@@ -3189,7 +3236,7 @@ string optimize_node(bhkPackedNiTriStripsShapeRef node) {
   return node->GetType().GetTypeName();
 }
 
-string optimize_node(bhkMoppBvTreeShapeRef node) {
+string OptimizeNode(bhkMoppBvTreeShapeRef node) {
   assert((nodemotion == MO_SYS_FIXED) || (nodemotion == MO_SYS_KEYFRAMED));
   nodemopped = true;
 
@@ -3209,9 +3256,13 @@ string optimize_node(bhkMoppBvTreeShapeRef node) {
      */
     if (unpack) {
       /* MOPP is gone */
-      string type = optimize_node(unpack);
+      string type = OptimizeNode(unpack);
       if (type != "bhkNiTriStripsShape")
 	abort();
+
+      /* skip optimizing MOPP */
+      if (!optimizesmmopp)
+	return node->GetType().GetTypeName();
 
       int sd = unpack->GetNumStripsData();
 
@@ -3248,6 +3299,7 @@ string optimize_node(bhkMoppBvTreeShapeRef node) {
       int wc = (int)_f.size();
       int fc = (int)_f.size();
 
+      /* single sub-shape MOPP */
       vector<int> vb(1);
       vector<Niflib::byte> vm(1);
       vector<short> vf(1);
@@ -3311,7 +3363,7 @@ string optimize_node(bhkMoppBvTreeShapeRef node) {
       int _fc = data->GetNumFace();
 
       /* MOPP is gone */
-      string type = optimize_node(pack);
+      string type = OptimizeNode(pack);
       if (type != "bhkPackedNiTriStripsShape")
 	abort();
 
@@ -3333,6 +3385,12 @@ string optimize_node(bhkMoppBvTreeShapeRef node) {
 	vm[ss] = os[ss].material;
 	vf[ss] = os[ss].colFilter;  // may be used ...
       }
+
+      /* skip optimizing MOPP */
+      if ((sc <= 1) && !optimizesmmopp)
+	return node->GetType().GetTypeName();
+      if ((sc >  1) && !optimizemmmopp)
+	return node->GetType().GetTypeName();
 
       vector<Niflib::Vector3> v = data->GetVertices();
       vector<Niflib::hkTriangle> w = data->GetTrianglesFull();
@@ -3430,16 +3488,16 @@ string optimize_node(bhkMoppBvTreeShapeRef node) {
   return node->GetType().GetTypeName();
 }
 
-string optimize_node(BSSegmentedTriShapeRef node) {
+string OptimizeNode(BSSegmentedTriShapeRef node) {
   return node->GetType().GetTypeName();
 }
 
-string optimize_node(NiEnvMappedTriShapeRef node) {
+string OptimizeNode(NiEnvMappedTriShapeRef node) {
   return node->GetType().GetTypeName();
 }
 
 /* corresponds to: SpellOptimizeGeometry */
-string optimize_node(NiTriShapeRef node) {
+string OptimizeNode(NiTriShapeRef node) {
   NiGeometryDataRef raw = node->GetData();
   NiTriShapeDataRef data = DynamicCast<NiTriShapeData>(raw);
 
@@ -3688,7 +3746,7 @@ string optimize_node(NiTriShapeRef node) {
       /* the collector considers the entire data-set of a vertex
        * to determine "unique" vertices
        */
-      rcollect_face(&tri);
+      CollectFace(&tri);
     }
 
     /* register what happened */
@@ -3699,9 +3757,9 @@ string optimize_node(NiTriShapeRef node) {
     nfoprintf(stdout, " Faces            : %6d to %6d (%.4f%%)\n", f.size(), Faces.size()   , 100.0f * Faces.size()    / f.size());
   }
 
-  rcalculate_faces();
-  rassignsector_faces((int)v.size());
-  roptimize_faces();
+  CalculateGeometryNormals();
+  IndexGeometry((int)v.size());
+  OptimizeGeometry();
 
   if (bx) {
     /* this is a copy? */
@@ -4192,7 +4250,7 @@ string optimize_node(NiTriShapeRef node) {
 	    nfoprintf(stdout, " Faces            : %6d to %6d (%.4f%%)\n", vf.size(), lf.size() / 3, 100.0f * (lf.size() / 3) / vf.size());
 
 	    /* we actually can reorder the vertices! */
-	    roptimize_faces(lv, lf, lm);
+	    OptimizeGeometry(lv, lf, lm);
 
 #if 0
 	    /* TODO: make this work */
@@ -4264,7 +4322,7 @@ string optimize_node(NiTriShapeRef node) {
       addnote(" Removed optional match-groups\n");
   }
 
-  free_faces();
+  FreeGeometry();
 
   if (brokenmorphvrtx || brokenbnweights || brokenpartition ||
       degeneratevertx || degeneratefaces || brokentangentsp) {
@@ -4297,7 +4355,7 @@ string optimize_node(NiTriShapeRef node) {
   return node->GetType().GetTypeName();
 }
 
-void strip_node(NiAVObjectRef node) {
+void StripNode(NiAVObjectRef node) {
   vector< Ref<NiProperty> > prps = node->GetProperties();
   vector< Ref<NiProperty> >::iterator pi;
   for (pi = prps.begin(); pi != prps.end(); pi++) {
@@ -4307,7 +4365,8 @@ void strip_node(NiAVObjectRef node) {
 	(pt == "NiAlphaProperty") ||
 	(pt == "NiSpecularProperty"))
       node->RemoveProperty(*pi);
-    else if ((pt == "NiTexturingProperty")) {
+    /* PM-removal only if barestrip */
+    else if ((pt == "NiTexturingProperty") && barestripfar) {
       NiTexturingPropertyRef tx = DynamicCast<NiTexturingProperty>(*pi);
 
       if (tx->GetApplyMode() == APPLY_HILIGHT2)
@@ -4319,7 +4378,8 @@ void strip_node(NiAVObjectRef node) {
   list< Ref<NiExtraData> > x = node->GetExtraData();
   list< Ref<NiExtraData> >::iterator xd;
   for (xd = x.begin(); xd != x.end(); xd++) {
-    if (DynamicCast<NiBinaryExtraData>(*xd)) {
+    /* TB-removal only if barestrip */
+    if (DynamicCast<NiBinaryExtraData>(*xd) && barestripfar) {
       if (!strcmp("Tangent space (binormal & tangent vectors)", (*xd)->GetName().data()))
 	node->RemoveExtraData(*xd);
     }
@@ -4347,7 +4407,7 @@ void strip_node(NiAVObjectRef node) {
   }
 }
 
-void modify_node(NiAVObjectRef node) {
+void ModifyNode(NiAVObjectRef node) {
   vector< Ref<NiProperty> > prps = node->GetProperties();
   vector< Ref<NiProperty> >::iterator pi;
   for (pi = prps.begin(); pi != prps.end(); pi++) {
@@ -4486,7 +4546,7 @@ void modify_node(NiAVObjectRef node) {
 }
 
 /* corresponds to: SpellCleanRefLists */
-void sanitize_node(NiAVObjectRef av, NiNodeRef nd, NiObjectRef ob) {
+void SanitizeNode(NiAVObjectRef av, NiNodeRef nd, NiObjectRef ob) {
   if (av) {
     /* kill empty extra-data */
     av->RemoveExtraData(NULL);
@@ -4676,7 +4736,7 @@ void sanitize_node(NiAVObjectRef av, NiNodeRef nd, NiObjectRef ob) {
   }
 }
 
-bool killcheck_node(NiAVObjectRef node) {
+bool KillcheckNode(NiAVObjectRef node) {
   NiGeometryRef geo = DynamicCast<NiGeometry>(node);
   NiGeometryDataRef dat = (geo ? geo->GetData() : NULL);
 
@@ -4691,7 +4751,7 @@ bool killcheck_node(NiAVObjectRef node) {
   return false;
 }
 
-void walk_nif(NiObjectRef root, NiNodeRef parent, NiObjectRef pref = NULL, bool farnif = false) {
+void WalkNIF(NiObjectRef root, NiNodeRef parent, NiObjectRef pref = NULL, bool farnif = false) {
   string type = root->GetType().GetTypeName();
   bhkCollisionObjectRef co = DynamicCast<bhkCollisionObject>(root);
   NiControllerSequenceRef cs = DynamicCast<NiControllerSequence>(root);
@@ -4720,14 +4780,14 @@ void walk_nif(NiObjectRef root, NiNodeRef parent, NiObjectRef pref = NULL, bool 
   }
 
   /* sanitize before */
-  sanitize_node(av, nd, ob);
+  SanitizeNode(av, nd, ob);
 
   /* do some preset stuff */
-  if (barestripfar && farnif) {
-    if (av) strip_node(av);
+  if ((barestripfar || optimizefar) && farnif) {
+    if (av) StripNode(av);
   }
   else {
-    if (av) modify_node(av);
+    if (av) ModifyNode(av);
   }
 
   /* optimize keys */
@@ -4744,30 +4804,30 @@ void walk_nif(NiObjectRef root, NiNodeRef parent, NiObjectRef pref = NULL, bool 
       string nodebarbak = nodebarref, wh;
 
       if (DynamicCast<NiInterpolator>(pref))
-	wh = find_controller(DynamicCast<NiInterpolator>(pref));
+	wh = FindController(DynamicCast<NiInterpolator>(pref));
       if (wh != "") {
 	nodebarref += ":";
 	nodebarref += wh;
       }
 
       /**/ if (type == "NiBoolData")
-	type = optimize_node(DynamicCast<NiBoolData>(root));
+	type = OptimizeNode(DynamicCast<NiBoolData>(root));
       else if (type == "NiTextKeyExtraData")
-	type = optimize_node(DynamicCast<NiTextKeyExtraData>(root));
+	type = OptimizeNode(DynamicCast<NiTextKeyExtraData>(root));
       else if (type == "NiVisData")
-	type = optimize_node(DynamicCast<NiVisData>(root));
+	type = OptimizeNode(DynamicCast<NiVisData>(root));
       else if (type == "NiMorphData")
-	type = optimize_node(DynamicCast<NiMorphData>(root));
+	type = OptimizeNode(DynamicCast<NiMorphData>(root));
       else if (type == "NiColorData")
-	type = optimize_node(DynamicCast<NiColorData>(root));
+	type = OptimizeNode(DynamicCast<NiColorData>(root));
       else if (type == "NiFloatData")
-	type = optimize_node(DynamicCast<NiFloatData>(root));
+	type = OptimizeNode(DynamicCast<NiFloatData>(root));
       else if (type == "NiPosData")
-	type = optimize_node(DynamicCast<NiPosData>(root));
+	type = OptimizeNode(DynamicCast<NiPosData>(root));
       else if (type == "NiKeyframeData")
-	type = optimize_node(DynamicCast<NiKeyframeData>(root));
+	type = OptimizeNode(DynamicCast<NiKeyframeData>(root));
       else if (type == "NiTransformData")
-	type = optimize_node(DynamicCast<NiKeyframeData>(root));
+	type = OptimizeNode(DynamicCast<NiKeyframeData>(root));
 
       nodebarref = nodebarbak;
     }
@@ -4784,11 +4844,11 @@ void walk_nif(NiObjectRef root, NiNodeRef parent, NiObjectRef pref = NULL, bool 
 
     if (geotoprimitive) {
       /**/ if (type == "bhkMoppBvTreeShape")
-	type = convert_node(DynamicCast<bhkMoppBvTreeShape>(root), parent, root);
+	type = ConvertNode(DynamicCast<bhkMoppBvTreeShape>(root), parent, root);
       else if (type == "bhkNiTriStripsShape")
-	type = convert_node(DynamicCast<bhkNiTriStripsShape>(root), parent, root);
+	type = ConvertNode(DynamicCast<bhkNiTriStripsShape>(root), parent, root);
       else if (type == "bhkPackedNiTriStripsShape")
-	type = convert_node(DynamicCast<bhkPackedNiTriStripsShape>(root), parent, root);
+	type = ConvertNode(DynamicCast<bhkPackedNiTriStripsShape>(root), parent, root);
     }
 
     if (stripstolists) {
@@ -4797,36 +4857,36 @@ void walk_nif(NiObjectRef root, NiNodeRef parent, NiObjectRef pref = NULL, bool 
       else if (type == "bhkPackedNiTriStripsShape")
 	type = type; /* doesn't have list-form */
       else if (type == "NiTriStrips")
-	type = convert_node(DynamicCast<NiTriStrips>(root), parent, root);
+	type = ConvertNode(DynamicCast<NiTriStrips>(root), parent, root);
       else if (type == "NiTriShape")
-	type = convert_node(DynamicCast<NiTriShape>(root), parent, root);
+	type = ConvertNode(DynamicCast<NiTriShape>(root), parent, root);
     }
 
     if (optimizehavok) {
       /**/ if (type == "bhkMoppBvTreeShape")
-	type = optimize_node(DynamicCast<bhkMoppBvTreeShape>(root));
+	type = OptimizeNode(DynamicCast<bhkMoppBvTreeShape>(root));
       else if (type == "bhkNiTriStripsShape")
-	type = optimize_node(DynamicCast<bhkNiTriStripsShape>(root));
+	type = OptimizeNode(DynamicCast<bhkNiTriStripsShape>(root));
       else if (type == "bhkPackedNiTriStripsShape")
-	type = optimize_node(DynamicCast<bhkPackedNiTriStripsShape>(root));
+	type = OptimizeNode(DynamicCast<bhkPackedNiTriStripsShape>(root));
     }
 
     if (optimizelists) {
       /**/ if (type == "BSSegmentedTriShape")
-	type = optimize_node(DynamicCast<BSSegmentedTriShape>(root));
+	type = OptimizeNode(DynamicCast<BSSegmentedTriShape>(root));
       else if (type == "NiEnvMappedTriShape")
-	type = optimize_node(DynamicCast<NiEnvMappedTriShape>(root));
+	type = OptimizeNode(DynamicCast<NiEnvMappedTriShape>(root));
       else if (type == "NiTriShape")
-	type = optimize_node(DynamicCast<NiTriShape>(root));
+	type = OptimizeNode(DynamicCast<NiTriShape>(root));
     }
   }
   else {
     list<NiObjectRef> links = root->GetRefs();
     for (list<NiObjectRef>::iterator it = links.begin(); it != links.end(); ++it) {
-      walk_nif(*it, nd, root, farnif);
+      WalkNIF(*it, nd, root, farnif);
 
       NiAVObjectRef ch = DynamicCast<NiAVObject>(*it);
-      if (nd && ch && killcheck_node(ch))
+      if (nd && ch && KillcheckNode(ch))
 	nd->RemoveChild(ch);
     }
   }
@@ -4840,7 +4900,7 @@ void walk_nif(NiObjectRef root, NiNodeRef parent, NiObjectRef pref = NULL, bool 
   }
 }
 
-void mark_nif(NiObjectRef root, NiNodeRef parent, bool inclusive) {
+void MarkNIF(NiObjectRef root, NiNodeRef parent, bool inclusive) {
   NiNodeRef nd = DynamicCast<NiNode>(root);
 
   /* clear entry */
@@ -4852,11 +4912,11 @@ void mark_nif(NiObjectRef root, NiNodeRef parent, bool inclusive) {
 
   list<NiObjectRef> links = root->GetRefs();
   for (list<NiObjectRef>::iterator it = links.begin(); it != links.end(); ++it) {
-    mark_nif(*it, nd, true);
+    MarkNIF(*it, nd, true);
   }
 }
 
-bool repair_nif(NiObjectRef root) {
+bool RepairNIF(NiObjectRef root) {
   /* find first non-NULL entry */
   vector<NiObjectRef>::iterator first, last, walk, next;
   for (first = utilization.begin(); first != utilization.end(); first++)
@@ -4978,7 +5038,7 @@ bool repair_nif(NiObjectRef root) {
 	  skn->SetSkinPartition(NULL);
 
 	  /* replace references everywhere */
-	  substitute_refs(DynamicCast<NiObject>(nskn), DynamicCast<NiObject>(skn));
+	  SubstituteRefs(DynamicCast<NiObject>(nskn), DynamicCast<NiObject>(skn));
 
 	  *walk = NULL;
 	}
@@ -5139,7 +5199,7 @@ bool repair_nif(NiObjectRef root) {
 
 /* ---------------------------------------------------------------------------------------------- */
 
-bool process_nif(const char *inname, const char *ouname, const char *rep) {
+bool ProcessNIF(const char *inname, const char *ouname, const char *rep) {
     vector<NiObjectRef>::iterator walk;
     char buf[1024];
 
@@ -5155,6 +5215,9 @@ bool process_nif(const char *inname, const char *ouname, const char *rep) {
     /* read the NIF */
     masterlist = ReadNifList(*ist, &masterinfo);
     if (masterlist.size()) {
+      /* mark the file to have been optimized (change version when adding more features) */
+      masterinfo.creator = "NO01";
+
       barprintf(stdout, '#', "%s", rep);
       if (verbose)
 	nfoprintf(stdout, "%s\n", inname);
@@ -5168,15 +5231,15 @@ bool process_nif(const char *inname, const char *ouname, const char *rep) {
 	utilization = masterlist;
 
 	/* remove root-attached entries from utilization */
-	mark_nif(masterroot, NULL, true);
+	MarkNIF(masterroot, NULL, true);
 	/* remove attached to unattached list-entries */
 	for (walk = masterlist.begin(); walk != masterlist.end(); walk++)
 	  if (*walk)
-	    mark_nif(*walk, NULL, false);
+	    MarkNIF(*walk, NULL, false);
 
 	/* repair untill nothing left */
 	int fixednodes = 0;
-	while (repair_nif(masterroot))
+	while (RepairNIF(masterroot))
 	  fixednodes++;
 
 	if (verbose) {
@@ -5226,7 +5289,7 @@ bool process_nif(const char *inname, const char *ouname, const char *rep) {
 	  putsuf(buf, buf, "_opt");
 
 	/* go and optimize */
-	walk_nif(masterroot, NULL, NULL, farnif);
+	WalkNIF(masterroot, NULL, NULL, farnif);
 
 	/* write the NIF back to disk */
 	if (!simulation) {
@@ -5285,7 +5348,7 @@ bool process_nif(const char *inname, const char *ouname, const char *rep) {
 
 /* ---------------------------------------------------------------------------------------------- */
 
-bool process_kf(const char *inname, const char *ouname, const char *rep) {
+bool ProcessKF(const char *inname, const char *ouname, const char *rep) {
   vector<NiObjectRef>::iterator walk;
   char buf[1024];
 
@@ -5328,7 +5391,7 @@ bool process_kf(const char *inname, const char *ouname, const char *rep) {
 	putsuf(buf, buf, "_opt");
 
       /* go and optimize */
-      walk_nif(masterroot, NULL, NULL, farnif);
+      WalkNIF(masterroot, NULL, NULL, farnif);
 
       /* write the NIF back to disk */
       if (!simulation) {
@@ -5554,17 +5617,21 @@ void process(const char *inname, const char *ouname) {
 	}
 
 	if (isext(inname, "nif")) {
-	  if (!skipprocessing) {
+	  if (skipmodels)
+	    docopy = false;
+	  else if (!skipprocessing) {
 	    fprintf(stderr, "processing \"%s\"\n", fle);
-	    docopy = !process_nif(inname, ouname, fle);
+	    docopy = !ProcessNIF(inname, ouname, fle);
 	    /* okay, done with */
 	  }
 	}
 
 	if (isext(inname, "kf")) {
-	  if (!skipprocessing) {
+	  if (skipmodels)
+	    docopy = false;
+	  else if (!skipprocessing) {
 	    fprintf(stderr, "processing \"%s\"\n", fle);
-	    docopy = !process_kf(inname, ouname, fle);
+	    docopy = !ProcessKF(inname, ouname, fle);
 	    /* okay, done with */
 	  }
 	}
@@ -5582,7 +5649,7 @@ void process(const char *inname, const char *ouname) {
 	    docopy = false;
 	  else if (!skipprocessing && stristr(inname, "textures\\")) {
 	    fprintf(stderr, "processing \"%s\"\n", fle);
-	    docopy = !process_dds(inname, ouname, fle);
+	    docopy = !ProcessDDS(inname, ouname, fle);
 	    /* okay, done with */
 	  }
 	}
@@ -5594,7 +5661,7 @@ void process(const char *inname, const char *ouname) {
 	    docopy = false;
 	  else if (!skipprocessing) {
 	    fprintf(stderr, "processing \"%s\"\n", fle);
-	    docopy = !process_wav(inname, ouname, fle);
+	    docopy = !ProcessWave(inname, ouname, fle);
 	    /* okay, done with */
 	  }
 	}
@@ -5650,7 +5717,7 @@ void process(const char *inname, const char *ouname) {
 
 /* ---------------------------------------------------------------------------------------------- */
 
-#undef	DATAMINING
+#define	DATAMINING
 #ifdef	DATAMINING
 #include "nifopt-db.C"
 #else
@@ -5668,7 +5735,8 @@ void prolog() {
   ioinit();
 
 #ifdef	DATAMINING
-  dbinit("nifopt.sqlite");
+  if (datamining)
+    dbinit("nifopt.sqlite");
 #endif
 
   // initialize Tootle
@@ -5694,7 +5762,8 @@ void epilog() {
   }
 
 #ifdef	DATAMINING
-  dbexit();
+  if (datamining)
+    dbexit();
 #endif
 
   ioexit();
@@ -5708,11 +5777,14 @@ char *outfile = NULL;
 static char option_usage[] = "Options: \n\
  -havokgeotoprim   convert Havok geometry to primitives (everywhere)\n\
  -stripstolists    convert NiTriStrips to NiTriShapes (everywhere)\n\
+ -optimizefar      optimize \"_far\" NIFs\n\
  -optimizelists    optimize NiTriShapes for vertex-cache and overdraw\n\
  -optimizeparts    optimize NiSkinPartitions for vertex-cache and overdraw\n\
  -optimizekeys     optimize keyframes in timelines\n\
- -optimizehavok    optimize Havok NiTriShapes and regenerate MOPP-code\n\
- -optimizetexts    optimize DDS quality, re-mip\n\
+ -optimizehavok    optimize Havok NiTriShapes\n\
+ -optimizesmmopp   regenerate single-material MOPP-codes (stable)\n\
+ -optimizemmmopp   regenerate multi-material MOPP-codes (experimental)\n\
+ -optimizetexts    optimize DDS quality, re-mip as well\n\
  -optimizequick    optimize faster but not so well, applies to NIFs and DDSs\n\
  -optimizenothing  don't optimize, just do conversions\n\
  -barestripfar     \"_far\" NIFs will be stripped bare to the bone\n\
@@ -5730,13 +5802,16 @@ static char option_usage[] = "Options: \n\
 \n\
  -compress <level> when wring BSA, compression-strength +- <0-9,10>\n\
  -compressimages   any image will be converted to DXT-DDSs, tex-paths adjusted\n\
- -compresssounds   compress sounds to MS ADPCM\n\
+ -compresssounds   compress sounds to MS ADPCM (unsupported by Oblivion)\n\
  -skipexisting     skip if the destination file exist\n\
  -skipnewer        skip if the destination file (or BSA) is newer\n\
+ -skipmodels       skip processing of model-files\n\
  -skipimages       skip processing of image-files\n\
  -skipsounds       skip processing of sound-files\n\
  -skipprocessing   skip any of the NIF i/o, just copy and report\n\
+ -processhidden    process hidden files and directories instead of skipping\n\
  -passthrough      copy broken and every file which is not a NIF as well\n\
+ -game <ob|sk>     indicate the gameversion being Oblivion (ob) or Skyrim (sk)\n\
  -simulate         operate in read-only mode, nothing will be written\n\
  -verbose          output more information\n\
  -criticals	   output only critical error related information\n\
@@ -5781,7 +5856,7 @@ static void usage(char *progname) {
   exit(1);
 }
 
-void parse_cmdline(int argc, char *argv[]) {
+void parseCommandline(int argc, char *argv[]) {
   if (argc < 2)
     usage(argv[0]);
 
@@ -5797,6 +5872,8 @@ void parse_cmdline(int argc, char *argv[]) {
       geotoprimitive = true;
     else if (!strcmp(argv[i], "-stripstolists"))
       stripstolists = true;
+    else if (!strcmp(argv[i], "-optimizefar"))
+      optimizefar = true;
     else if (!strcmp(argv[i], "-optimizelists"))
       optimizelists = optimizeparts = true;
     else if (!strcmp(argv[i], "-optimizeparts"))
@@ -5805,6 +5882,10 @@ void parse_cmdline(int argc, char *argv[]) {
       optimizekeys = true;
     else if (!strcmp(argv[i], "-optimizehavok"))
       optimizehavok = true;
+    else if (!strcmp(argv[i], "-optimizesmmopp"))
+      optimizesmmopp = true;
+    else if (!strcmp(argv[i], "-optimizemmmopp"))
+      optimizemmmopp = true;
     else if (!strcmp(argv[i], "-optimizequick"))
       optimizequick = true;
     else if (!strcmp(argv[i], "-optimizetexts"))
@@ -5833,6 +5914,8 @@ void parse_cmdline(int argc, char *argv[]) {
       normalsteepness = 2;
     else if (!strcmp(argv[i], "-mipgamma"))
       colormapgamma = true;
+    else if (!strcmp(argv[i], "-skipmodels"))
+      skipmodels = true;
     else if (!strcmp(argv[i], "-skipimages"))
       skipimages = true;
     else if (!strcmp(argv[i], "-skipsounds"))
@@ -5843,6 +5926,8 @@ void parse_cmdline(int argc, char *argv[]) {
       skipnewer = true;
     else if (!strcmp(argv[i], "-skipprocessing"))
       skipprocessing = true;
+    else if (!strcmp(argv[i], "-processhidden"))
+      processhidden = true;
     else if (!strcmp(argv[i], "-passthrough"))
       passthrough = true;
     else if (!strcmp(argv[i], "-verbose"))
@@ -5859,15 +5944,28 @@ void parse_cmdline(int argc, char *argv[]) {
       simulation = true;
     else if (!strcmp(argv[i], "-analyze"))
       datamining = true;
+    else if (!strcmp(argv[i], "-game")) {
+      ++i;
+      if (!strcmp(argv[i], "ob"))
+	gameversion = OB_BSAHEADER_VERSION;
+      else if (!strcmp(argv[i], "sk"))
+	gameversion = SK_BSAHEADER_VERSION, skipmodels = true;
+    }
     else if (!strcmp(argv[i], "-deployment"))
+      geotoprimitive = true,
       stripstolists = true,
-      optimizelists =
+      optimizehavok = true,
+      optimizesmmopp = true,
+      optimizemmmopp = false,
+      optimizefar = true,
+      optimizelists = true,
       optimizeparts = true,
+      optimizekeys = true,
       optimizequick = false,
       optimizetexts = true,
       reattachnodes = false,
       skiphashcheck = true,
-      barestripfar = true,
+      barestripfar = false,
       normalmapts = false,
       normalsteepness = 2,
       colormapgamma = true,
@@ -5877,9 +5975,15 @@ void parse_cmdline(int argc, char *argv[]) {
       compressimages = true,
       compresslevel = 10;
     else if (!strcmp(argv[i], "-copy"))
+      geotoprimitive = false,
       stripstolists = false,
-      optimizelists =
+      optimizehavok = false,
+      optimizesmmopp = false,
+      optimizemmmopp = false,
+      optimizefar = false,
+      optimizelists = false,
       optimizeparts = false,
+      optimizekeys = false,
       optimizequick = false,
       optimizetexts = false,
       reattachnodes = false,
@@ -5899,6 +6003,8 @@ void parse_cmdline(int argc, char *argv[]) {
       infile = argv[i];
     else if (!outfile)
       outfile = argv[i];
+    else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "-help"))
+      usage(argv[0]);
     else
       usage(argv[0]);
   }
@@ -5915,12 +6021,22 @@ void parse_cmdline(int argc, char *argv[]) {
 
   /* normalize */
   char *rpl;
-  if (infile)
+
+  if (infile) {
     while ((rpl = strchr(infile, '/')))
       *rpl = '\\';
-  if (outfile)
+    rpl = infile + strlen(infile);
+    while (*--rpl == '\\')
+      *rpl = '\0';
+  }
+
+  if (outfile) {
     while ((rpl = strchr(outfile, '/')))
       *rpl = '\\';
+    rpl = outfile + strlen(outfile);
+    while (*--rpl == '\\')
+      *rpl = '\0';
+  }
 }
 
 void summary(FILE *out) {
@@ -5938,6 +6054,7 @@ void summary(FILE *out) {
     fprintf(out, " fixed paths: %d\n", fixedpaths);
     fprintf(out, " broken hierarchy: %d\n", brokennodes);
     fprintf(out, " broken files: %d (%d without fixed ones)\n", brokenfiles, brokenfiles - fixedfiles);
+    fprintf(out, " planar (1x1) textures: %d\n", planartexts);
     fprintf(out, " changed texture formats: %d\n", changedformats);
 
     if (processedoubytes || processedinbytes)
@@ -5987,7 +6104,7 @@ void summary(FILE *out) {
 }
 
 int main(int argc,char **argv) {
-    parse_cmdline(argc, argv);
+    parseCommandline(argc, argv);
 
     prolog();
 

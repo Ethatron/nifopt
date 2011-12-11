@@ -140,13 +140,13 @@ std::vector<class objFace *> Faces;
 int tri_procd = 0;
 int tri_opted = 0;
 
-class objFace *register_checked_face(const Vertex3d& _p1,
+class objFace *RegisterFace(const Vertex3d& _p1,
 				     const Vertex3d& _p2,
 				     const Vertex3d& _p3) {
 
     /* orient CCW */
     if (TriArea(_p1, _p2, _p3) < 0.0) {
-      return register_checked_face(_p1, _p3, _p2); }
+      return RegisterFace(_p1, _p3, _p2); }
 
     Vertex3d p1, p2, p3;
 
@@ -270,17 +270,17 @@ class objFace *register_checked_face(const Vertex3d& _p1,
     return f;
 }
 
-class objFace *rcollect_checked_face(const Vertex3d& tp1, const Vertex3d& tp2, const Vertex3d& tp3) {
-    return register_checked_face(tp1, tp2, tp3);
+class objFace *SplitFace(const Vertex3d& tp1, const Vertex3d& tp2, const Vertex3d& tp3) {
+    return RegisterFace(tp1, tp2, tp3);
 }
 
-void rcollect_face(Triangle3d *t) {
+void CollectFace(Triangle3d *t) {
     const Vertex3d& p1 = t->point1();
     const Vertex3d& p2 = t->point2();
     const Vertex3d& p3 = t->point3();
     class objFace *f;
 
-    if ((f = rcollect_checked_face(p1, p2, p3)))
+    if ((f = SplitFace(p1, p2, p3)))
       f->extra = t->extra;
 
     tri_procd++;
@@ -288,7 +288,7 @@ void rcollect_face(Triangle3d *t) {
       fprintf(stderr, "faces processed %d\r", tri_procd);
 }
 
-void rcalculate_faces() {
+void CalculateGeometryNormals() {
     set<class objVertex *, struct V>::iterator itv;
     vector<class objFace *>::iterator itf;
 
@@ -304,7 +304,7 @@ std::set<class objVertex *, struct V> SectorVertices;
 std::vector<class objFace *> SectorFaces;
 std::vector<int> SectorRemap;
 
-void rassignsector_faces(int maxv) {
+void IndexGeometry(int maxv) {
     set<class objVertex *, struct V>::iterator itv;
     vector<class objFace *>::iterator itf;
 
@@ -581,7 +581,7 @@ struct Vertex3D
    float z;
 }; // End of ObjVertex3D
 
-void roptimize_faces() {
+void OptimizeGeometry() {
     set<class objVertex *, struct V>::iterator itv;
     vector<class objFace *>::iterator itf;
     vector<int>::iterator iti;
@@ -918,7 +918,7 @@ void roptimize_faces() {
         //  In fact, we are sending the wrong vertex buffer here (it should be based on the original file instead of the
         //  rehashed vertices).  But, it is ok because we do not request the reordered vertex buffer as an output.
         if (TootleOptimizeVertexMemory(pfVB, pnIB, nVertices, nFaces, nStride,
-        	pfVB, pnIB, pfRM) != TOOTLE_OK)
+        			       pfVB, pnIB, pfRM) != TOOTLE_OK)
           return;
 
 	/// \param pnVertexRemapOut     An array that will receive a vertex re-mapping.  May be NULL if the output is not requested.
@@ -972,7 +972,7 @@ void roptimize_faces() {
     }
 }
 
-void roptimize_faces(vector<Vertex3D> &vertices,
+void OptimizeGeometry(vector<Vertex3D> &vertices,
 		     vector<unsigned int> &indices,
 		     vector<unsigned int> &remap) {
 
@@ -1288,7 +1288,7 @@ void roptimize_faces(vector<Vertex3D> &vertices,
     }
 }
 
-void free_faces() {
+void FreeGeometry() {
   set<class objVertex *, struct V>::iterator itv;
   vector<class objFace *>::iterator itf;
 

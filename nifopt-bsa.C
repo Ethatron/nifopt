@@ -8,6 +8,7 @@ int compresslevel = Z_BEST_SPEED;
 bool compressbsa = true;
 bool srchbestbsa = false;
 bool thresholdbsa = true;
+int gameversion = -1;
 
 #include <string>
 #include <vector>
@@ -22,12 +23,14 @@ using namespace std;
 #define OB_BSAHEADER_FILEID  0x00415342 //!< Magic for Oblivion BSA, the literal string "BSA\0".
 #define OB_BSAHEADER_VERSION 0x67 //!< Version number of an Oblivion BSA
 #define F3_BSAHEADER_VERSION 0x68 //!< Version number of a Fallout 3 BSA
+#define SK_BSAHEADER_VERSION 0x68 //!< Version number of a Skyrim BSA
 
 /* Archive flags */
 #define OB_BSAARCHIVE_PATHNAMES           0x0001 //!< Whether the BSA has names for paths
 #define OB_BSAARCHIVE_FILENAMES           0x0002 //!< Whether the BSA has names for files
 #define OB_BSAARCHIVE_COMPRESSFILES       0x0004 //!< Whether the files are compressed
 #define F3_BSAARCHIVE_PREFIXFULLFILENAMES 0x0100 //!< Whether the name is prefixed to the data?
+#define SK_BSAARCHIVE_PREFIXFULLFILENAMES 0x0100 //!< Whether the name is prefixed to the data?
 
 /* File flags */
 #define OB_BSAFILE_NIF  0x0001 //!< Set when the BSA contains NIF files
@@ -189,9 +192,9 @@ public:
 public:
   mutable struct OBBSAFileInfo iinfo;
   mutable struct OBBSAFileInfo oinfo;
-  
+
   void GenHash() const {
-//  iinfo.hash = 
+//  iinfo.hash =
     oinfo.hash = ::GenHash("", *this);
   }
 
@@ -219,9 +222,9 @@ public:
 public:
   mutable struct OBBSAFolderInfo iinfo;
   mutable struct OBBSAFolderInfo oinfo;
-  
+
   void GenHash() const {
-//  iinfo.hash = 
+//  iinfo.hash =
     oinfo.hash = ::GenHash(*this, "");
   }
 
@@ -262,7 +265,7 @@ protected:
   int    fls, flc;
 
   void smallcopy(const unsigned int sze, FILE *src, FILE *dst) {
-    unsigned int cnt = sze, blk, rsr, wds;
+    size_t cnt = sze, blk, rsr, wds;
 
     /* copy with small buffer */
     do {
@@ -285,7 +288,7 @@ protected:
   }
 
   bool smallcompare(const unsigned int sze, FILE *src, FILE *dst) {
-    unsigned int cnt = sze, blk, rsr, rds;
+    size_t cnt = sze, blk, rsr, rds;
     bool diff = false;
 
     /* compare with small buffer */
@@ -303,17 +306,17 @@ protected:
     } while (cnt != 0);
 
     /* rewind to source-location */
-    if (fseek(src, -sze, SEEK_CUR))
+    if (fseek(src, -((long)sze), SEEK_CUR))
       throw runtime_error("Seeking BSA failed!");
     /* rewind to destination-location */
-    if (fseek(dst, -sze, SEEK_CUR))
+    if (fseek(dst, -((long)sze), SEEK_CUR))
       throw runtime_error("Seeking BSA failed!");
 
     return diff;
   }
 
   unsigned int smalladler(const unsigned int sze, FILE *src) {
-    unsigned int cnt = sze, blk, rsr;
+    size_t cnt = sze, blk, rsr;
     unsigned int adler = adler32(0,0,0);
 
     /* compare with small buffer */
@@ -323,13 +326,13 @@ protected:
       if ((rsr = fread(mem, 1, blk, src)) != blk)
 	throw runtime_error("Reading BSA failed!");
 
-      adler = adler32(adler, (const Bytef *)mem, blk);
+      adler = adler32(adler, (const Bytef *)mem, (uInt)blk);
 
       cnt -= blk;
     } while (cnt != 0);
 
     /* rewind to source-location */
-    if (fseek(src, -sze, SEEK_CUR))
+    if (fseek(src, -((long)sze), SEEK_CUR))
       throw runtime_error("Seeking BSA failed!");
 
     return adler;
@@ -345,7 +348,7 @@ public:
 
     arctime = 0; struct stat sinfo;
     if (!::stat(pathname, &sinfo))
-      arctime = sinfo.st_mtime;
+      arctime = sinfo.st_ctime;
 
     /* open for reading */
     if ((ibsa = fopen(pathname, "rb"))) {
@@ -356,7 +359,11 @@ public:
 	if (fread(&version, 1, sizeof(version), ibsa) != sizeof(version))
 	  return (loaded = true);
 
-	if (version == OB_BSAHEADER_VERSION) {
+	if ((version == OB_BSAHEADER_VERSION) ||
+	    (version == SK_BSAHEADER_VERSION)) {
+	  if (gameversion == -1)
+	    gameversion = (int)version;
+
 	  if (fread(&header, 1, sizeof(header), ibsa) != sizeof(header))
 	    return (loaded = true);
 	  if (fseek(ibsa, 0, SEEK_END))
@@ -368,7 +375,7 @@ public:
 	  	header.FolderCount * sizeof(char) +
 	  	header.FolderNameLength +
 		header.FileCount   * sizeof(OBBSAFileInfo);
-	  size_t EndOfDirectory = 
+	  size_t EndOfDirectory =
 		header.FolderCount * sizeof(OBBSAFolderInfo) +
 		       FolderFileBlob +
 		header.FileNameLength;
@@ -430,10 +437,11 @@ public:
 	    folder.GenHash();
 
 	    /* verify integrity */
-	    if (!skiphashcheck)
+	    if (!skiphashcheck || verbose)
 	      if (folder.iinfo.hash != folder.oinfo.hash) {
 		fprintf(stderr, "Hash for folder \"%s\" in \"%s\" is different!\n", folder.data(), pathname);
-		throw runtime_error("BSA corrupt!");
+		if (!skiphashcheck)
+		  throw runtime_error("BSA corrupt!");
 	      }
 
 #if 0
@@ -456,6 +464,9 @@ public:
 	      file.iinfo = *f;
 	      file.filetype = filetype(&file);
 
+	      /* flip the compressed flag (easier to handle on each file individually) */
+	      file.iinfo.sizeFlags ^= (header.ArchiveFlags & OB_BSAARCHIVE_COMPRESSFILES ? OB_BSAFILE_FLAG_COMPRESS : 0);
+
 	      /* clear the rest */
 	      memset(&file.oinfo, 0, sizeof(file.oinfo));
 
@@ -471,10 +482,11 @@ public:
 	      file.GenHash();
 
 	      /* verify integrity */
-	      if (!skiphashcheck)
+	      if (!skiphashcheck || verbose)
 		if (file.iinfo.hash != file.oinfo.hash) {
 		  fprintf(stderr, "Hash for file \"%s\" in \"%s\" is different!\n", file.data(), pathname);
-		  throw runtime_error("BSA corrupt!");
+		  if (!skiphashcheck)
+		    throw runtime_error("BSA corrupt!");
 		}
 
 #if 0
@@ -496,6 +508,9 @@ public:
 
 	  sizehead = ftell(ibsa);
 	  sizebody = sizefile - sizehead;
+
+	  /* remove compressed flag (it's on each individual file now) */
+	  header.ArchiveFlags &= ~OB_BSAARCHIVE_COMPRESSFILES;
 	}
       }
     }
@@ -518,13 +533,19 @@ public:
 
 	_magic   = OB_BSAHEADER_FILEID;
 	_version = OB_BSAHEADER_VERSION;
+	if (gameversion != -1)
+	  _version = (unsigned int)gameversion;
 
 	memset(&_header, 0, sizeof(_header));
 
 	/* take some stuff over */
 	_header.FileFlags = (header.FileFlags & 0xFFFF0000);
-	_header.ArchiveFlags |= OB_BSAARCHIVE_PATHNAMES | OB_BSAARCHIVE_FILENAMES | (compressbsa ? OB_BSAARCHIVE_COMPRESSFILES : 0) | 0x0700;
+	_header.ArchiveFlags |= OB_BSAARCHIVE_PATHNAMES | OB_BSAARCHIVE_FILENAMES | (compressbsa ? OB_BSAARCHIVE_COMPRESSFILES : 0);
 	_header.FolderRecordOffset = sizeof(_magic) + sizeof(_version) + sizeof(_header);
+
+	/* unknown */
+	if (_version == OB_BSAHEADER_VERSION)
+	 _header.ArchiveFlags |= 0x0700;
 
 	/* walk (for summary) */
 	{
@@ -558,6 +579,7 @@ public:
 		  bdy += (*ft).iinfo.sizeFlags & (~OB_BSAFILE_FLAG_ALLFLAGS);
 		  flc += 1;
 		}
+		/* this is a non-zero byte file! */
 		else if ((*ft).oinfo.sizeFlags || (*ft).iinfo.sizeFlags)
 		  throw runtime_error("Lost BSA-File reference!");
 		if (bdy > 0x7FFFFFFF)
@@ -574,7 +596,7 @@ public:
 	  _header.FolderCount * sizeof(char) +
 	  _header.FolderNameLength +
 	  _header.FileCount   * sizeof(OBBSAFileInfo);
-	size_t EndOfDirectory = 
+	size_t EndOfDirectory =
 	  _header.FolderCount * sizeof(OBBSAFolderInfo) +
 	          FolderFileBlob +
 	  _header.FileNameLength;
@@ -629,8 +651,8 @@ public:
 	      /* fill folder structure */
 	      dir.hash = (*dt)->oinfo.hash;
 	      dir.fileCount = (unsigned int)num;
-	      dir.offset = 
-		_header.FolderRecordOffset + 
+	      dir.offset =
+		_header.FolderRecordOffset +
 		_header.FolderCount * sizeof(OBBSAFolderInfo) +
 		_header.FileNameLength +
 		(dfmix - &dfblob[0]);
@@ -757,6 +779,13 @@ public:
 		  /* copy with small buffer */
 		  if (diff)
 		    smallcopy(sze, ibsa, fbsa);
+		}
+		/* zero-byte files (no in, no out) */
+		else {
+		  /* fill file structure */
+		  fle.hash = (*ft)->oinfo.hash;
+		  fle.sizeFlags = (*ft)->oinfo.sizeFlags;
+		  fle.offset = ftell(fbsa);
 		}
 
 		/* revoke individual-compressed flag */
@@ -993,10 +1022,10 @@ public:
     }
 
     /* implicit folders */
-    if (contents.size()) {
+//  if (contents.size()) {
       contents.insert(".");
       contents.insert("..");
-    }
+//  }
 
     return contents;
   }
@@ -1025,7 +1054,7 @@ public:
 	bsfile sch; sch.assign(pathname);
 	std::transform(sch.begin(), sch.end(), sch.begin(), ::tolower);
 	std::replace(sch.begin(), sch.end(), '/', '\\');
-	
+
 	/* go find it, or add it */
 	bsfileset::iterator ft = (*dt).files.find(sch);
 	if (ft != (*dt).files.end()) {
@@ -1148,7 +1177,7 @@ public:
 
 	  if ((res = fseek(ibsa, file->iinfo.offset, SEEK_SET)))
 	    return 0;
-	  if ((ret = fread(&sze, 1, sizeof(sze), ibsa)) != sizeof(sze))
+	  if ((ret = fread(&sze, 1, sizeof(long), ibsa)) != sizeof(long))
 	    return 0;
 	}
       }
@@ -1208,10 +1237,19 @@ public:
       /* compression path */
       if (zlb) {
 	void *backbuffer = file->inp;
+	void *bckpbuffer = file->inp;
+
+	/* prefixed name */
+	if ((version == SK_BSAHEADER_VERSION) &&
+	    (header.ArchiveFlags & SK_BSAARCHIVE_PREFIXFULLFILENAMES)) {
+	  unsigned char nlen = *((unsigned char *)backbuffer);
+	  backbuffer = ((unsigned char *)backbuffer) + sizeof(unsigned char) + nlen;
+	}
+
 	unsigned int realsze = *((unsigned int *)backbuffer);
 
 	file->inc = realsze;
-	file->inp = malloc(realsze);
+	file->inp = malloc(realsze + 1024);
 	file->ins = realsze;
 	file->ina = 0;
 
@@ -1219,18 +1257,23 @@ public:
 	if (!file->inp)
 	  return 0;
 
+	realsze += 1024;
 	res = uncompress(
-	  (Bytef *)file->inp + 0, 
-	  (uLongf *)&realsze, 
-	  (Bytef *)backbuffer + 4, 
+	  (Bytef *)file->inp + 0,
+	  (uLongf *)&realsze,
+	  (Bytef *)backbuffer + sizeof(int),
 	  (uLongf)sze
 	);
 
-	free(backbuffer);
+	free(bckpbuffer);
 
 	/* failure */
-	if (res != Z_OK)
+	if (res != Z_OK) {
+	  /* this happens with 0-size files */
+	  if (realsze)
+	    fprintf(stderr, "File \"%s\" has corrupt compression!\n", file->data());
 	  return 0;
+	}
 
 	/* collect data */
 	compressedinbytes += sze;
@@ -1281,7 +1324,7 @@ public:
       if (!file->oup)
 	return 0;
     }
-    
+
     /* don't limit writing */
     if ((file->oua + length) > file->ous) {
       file->ouc = file->oua + length;
@@ -1342,16 +1385,29 @@ public:
 	  if ((zlb |= (compressbsa ? OB_BSAFILE_FLAG_COMPRESS : 0))) {
 	    unsigned int realsze = file->ous;
 	    unsigned int packsze = file->ous;
-	    void *backbuffer = file->oup;
+	    void *backbuffer = file->oup, *frntbuffer;
+	    int offset = 0;
 
 	    file->ouc = realsze;
-	    file->ous = sizeof(int) + 1024 + compressBound(realsze) * 2;
+	    file->ous = 1024 + sizeof(int) + compressBound(realsze) * 2;
 	    file->oup = malloc(file->ous);
 	    file->oua = 0;
 
 	    /* failure */
-	    if (!file->oup)
+	    if (!(frntbuffer = file->oup))
 	      throw runtime_error("Writing BSA failed, running out of memory!");
+
+	    /* prefixed name */
+	    if ((version == SK_BSAHEADER_VERSION) &&
+		(header.ArchiveFlags & SK_BSAARCHIVE_PREFIXFULLFILENAMES)) {
+	      const char *lname = file->data();
+	      size_t nlen = strlen(lname);
+
+	      *((unsigned char *)frntbuffer) = (unsigned char)nlen;
+	      strcpy((char *)frntbuffer + sizeof(unsigned char), lname);
+
+	      frntbuffer = (char *)frntbuffer + sizeof(unsigned char) + nlen;
+	    }
 
 	    /* search best strategy */
 	    int wbits = MAX_WBITS;
@@ -1368,9 +1424,9 @@ public:
 		packsze = file->ous;
 
 		res = compress2(
-		  (Bytef *)file->oup + 4, 
-		  (uLongf *)&packsze, 
-		  (Bytef *)backbuffer, 
+		  (Bytef *)frntbuffer + sizeof(int),
+		  (uLongf *)&packsze,
+		  (Bytef *)backbuffer,
 		  (uLongf)realsze,
 		  compresslevel,
 		  Z_DEFLATED,
@@ -1407,15 +1463,15 @@ public:
 		packsze = file->ous;
 
 		if (compress_rfc1950_7z(
-		      (const unsigned char *)backbuffer, realsze, 
-		      (unsigned char *)file->oup + 4, packsze,
+		      (const unsigned char *)backbuffer, realsze,
+		      (unsigned char *)frntbuffer + sizeof(int), packsze,
 		      passes, fastbytes)) {
 
 #if 0
 		  res = uncompress(
-		    (Bytef *)backbuffer + 0, 
-		    (uLongf *)&realsze, 
-		    (Bytef *)file->oup + 4, 
+		    (Bytef *)backbuffer + 0,
+		    (uLongf *)&realsze,
+		    (Bytef *)frntbuffer + sizeof(int),
 		    (uLongf)packsze
 		  );
 
@@ -1474,9 +1530,9 @@ public:
 		packsze = file->ous;
 
 		res = compress2(
-		  (Bytef *)file->oup + 4, 
-		  (uLongf *)&packsze, 
-		  (Bytef *)backbuffer, 
+		  (Bytef *)frntbuffer + sizeof(int),
+		  (uLongf *)&packsze,
+		  (Bytef *)backbuffer,
 		  (uLongf)realsze,
 		  compresslevel,
 		  Z_DEFLATED,
@@ -1491,10 +1547,10 @@ public:
 
 #if 0
 		res = uncompress(
-		  (Bytef *)backbuffer + 0, 
-		  (uLongf *)&realsze, 
-		  (Bytef *)file->oup + 4, 
-		  (uLongf)*((unsigned int *)file->oup)
+		  (Bytef *)backbuffer + 0,
+		  (uLongf *)&realsze,
+		  (Bytef *)frntbuffer + sizeof(int),
+		  (uLongf)*((unsigned int *)frntbuffer)
 		);
 
 		/* failure */
@@ -1521,10 +1577,13 @@ public:
 	    }
 
 	    if (strategy > -2) {
-	      /* read compressed size in */
-	      file->ous = sizeof(int) + packsze;
-	      /* and put original size back */
-	      *((unsigned int *)file->oup) = realsze;
+	      /* write compressed size out */
+	      file->ous =
+		((unsigned char *)frntbuffer - (unsigned char *)file->oup) +
+		sizeof(int) + packsze;
+
+	      /* and put original size in */
+	      *((unsigned int *)frntbuffer) = realsze;
 
 	      free(backbuffer);
 
@@ -1559,24 +1618,27 @@ public:
 	    /* collect data */
 	    compressedoubytes += file->ous;
 	  }
-
+	  
+	  char *fail = NULL;
 	  if (file->ous > (~OB_BSAFILE_FLAG_ALLFLAGS))
-	    throw runtime_error("The file-record exceeds 1GiB!");
-
+	    fail = "The file-record exceeds 1GiB!";
 	  /* the order of the files in our temporary blob is irrelevant
 	   * no need to make it ordered, just prevent overlapping writes
 	   */
-	  ioblock(); {
+	  else { ioblock(); {
 	    file->oinfo.sizeFlags = file->ous;
 	    file->oinfo.offset = ftell(obsa);
+
+	    /* check sanity */
 	    if (file->oinfo.offset > 0x7FFFFFFF)
-	      throw runtime_error("The temporary file exceeds 2GiB!");
-
+	      fail = "The temporary file exceeds 2GiB!";
 	    /* write to temporary file */
-	    if ((ret = fwrite(file->oup, 1, file->ous, obsa)) != file->ous)
-	      throw runtime_error("Writing BSA failed!");
-	  }; iorelease();
+	    else if ((ret = fwrite(file->oup, 1, file->ous, obsa)) != file->ous)
+	      fail = "Writing BSA failed!";
+	  }; iorelease(); }
 
+	  if (fail)
+	    throw runtime_error(fail);
 	  if (zlb)
 	    file->oinfo.sizeFlags |= OB_BSAFILE_FLAG_COMPRESS;
 
@@ -1610,7 +1672,7 @@ public:
       file->ina = 0;
     }
   }
-  
+
   bool eof(const bsfile *file) const {
     /* points to the end */
     return (file->ina == file->ins);
@@ -1813,8 +1875,9 @@ int rmdir_arc(const char *pathname) {
 	  arc.close();
 	}
 
-	cachearc.erase(arcname);
+	/* cachearc is the string-owner */
 	archives.erase(arcname);
+	cachearc.erase(arcname);
 	return  unlink(arcname);
       }
       else if ((*pathname) == '\\')
@@ -1908,8 +1971,9 @@ void closedir_arc(void *dir) {
       r->arc->close();
     }
 
-    cachearc.erase(r->arcname);
+    /* cachearc is the string-owner */
     archives.erase(r->arcname);
+    cachearc.erase(r->arcname);
   }
 
   delete r;
@@ -1923,6 +1987,7 @@ public:
 
   const char *arcname;
   bsarchive *arc;
+  char arcmode;
 };
 
 void * __stdcall fopen_arc(const char *pathname, const char *mode) {
@@ -1944,17 +2009,19 @@ void * __stdcall fopen_arc(const char *pathname, const char *mode) {
       if ((*pathname) == '\0')
 	;
       else if ((*pathname) == '\\') {
-	const bsfile *file;
+	const bsfile *file = NULL;
+	const char *rmode;
 
-	if (strchr(mode, 'w'))
+	if ((rmode = strchr(mode, 'w')))
 	  file = arc.put(pathname + 1);
-	else if (strchr(mode, 'r'))
+	else if ((rmode = strchr(mode, 'r')))
 	  file = arc.get(pathname + 1);
 
 	if (file) {
 	  r = new it_file_arc;
 	  r->arc = &arc;
 	  r->arcname = arcname;
+	  r->arcmode = rmode[0];
 	  r->file = file;
 	}
       }
@@ -1988,13 +2055,21 @@ int __stdcall fputs_arc(const char *str, void *file) {
 
 DWORD __stdcall fclose_arc_async(void *file) {
   it_file_arc *r = (it_file_arc *)file;
-  r->arc->leave(r->file);
+  try {
+    r->arc->leave(r->file); }
+  catch(exception &e) {
+    iorethrow(e.what()); }
   delete file;
   return NULL;
 }
 
 void __stdcall fclose_arc(void *file) {
-  iodispatch(fclose_arc_async, file);
+  it_file_arc *r = (it_file_arc *)file;
+  /* nowait asynchronous (write-queue) */
+  if (r->arcmode == 'w')
+    iodispatch(fclose_arc_async, file);
+  else
+    fclose_arc_async(file);
 }
 
 bool __stdcall feof_arc(void *file) {
@@ -2041,7 +2116,7 @@ public:
 istream *openistream_arc(const char *pathname) {
   istream_arc *r = NULL;
   class it_file_arc *iface;
-  
+
   iface = (class it_file_arc *)fopen_arc(pathname, "rb");
   if (iface) {
     r = new istream_arc;
@@ -2085,10 +2160,10 @@ void closeostream_arc(ostream *ost) {
 
 //ioflushtofile(r->str().data(), r->str().length(), r->iface);
 
-  /* TODO: nowait asynchronous (write-queue) */
+  /* nowait asynchronous (write-queue) */
 //#pragma omp single nowait
   {
-    size_t written = 
+    size_t written =
 
     /* copy-over the string ... */
     fwrite_arc(r->str().data(), 1, r->str().length(), r->iface);
@@ -2101,19 +2176,19 @@ void closeostream_arc(ostream *ost) {
 long tellistream_arc(istream *ist) {
   istream_arc *r = (istream_arc *)ist;
 //return ftell_arc(r->iface);
-  long check = r->str().length();
-  long verfy = ist->rdbuf()->pubseekoff(0, ios_base::cur, ios_base::in);
+  size_t check = r->str().length();
+  size_t verfy = ist->rdbuf()->pubseekoff(0, ios_base::cur, ios_base::in);
   assert(check == verfy);
-  return check;
+  return (long)check;
 }
 
 long tellostream_arc(ostream *ost) {
   ostream_arc *r = (ostream_arc *)ost;
 //return ftell_arc(r->iface);
-  long check = r->str().length();
-  long verfy = ost->rdbuf()->pubseekoff(0, ios_base::cur, ios_base::out);
+  size_t check = r->str().length();
+  size_t verfy = ost->rdbuf()->pubseekoff(0, ios_base::cur, ios_base::out);
   assert(check == verfy);
-  return check;
+  return (long)check;
 }
 
 bool isarchive(istream *ist) {

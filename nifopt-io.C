@@ -16,6 +16,14 @@
 CRITICAL_SECTION cs;
 long int tmax, trunning;
 HANDLE threads[256];
+bool rethrow = false;
+char rethrowing[256];
+SYSTEM_INFO sysinfo;
+
+void iorethrow(const char *what) {
+  strcpy(rethrowing, what);
+  rethrow = true;
+}
 
 void ioblock() {
   EnterCriticalSection(&cs);
@@ -26,7 +34,6 @@ void iorelease() {
 }
 
 void ioinit() {
-  SYSTEM_INFO sysinfo;
   GetSystemInfo(&sysinfo);
 
   tmax = max(1, sysinfo.dwNumberOfProcessors);
@@ -47,35 +54,31 @@ void ioappend(HANDLE thread) {
   trunning++;
 
   /* and lower number of allowed threads */
-  DWORD wait = 0;
+  DWORD wait = 0, signaled;
   if (--tmax == 0)
     wait = INFINITE;
 
   /* wait for thread termination */
-  while (WaitForSingleObject(threads[0], wait) == WAIT_OBJECT_0) {
+//while (WaitForSingleObject(threads[0], wait) == WAIT_OBJECT_0) {
+  if ((signaled = WaitForMultipleObjects(trunning, threads, FALSE, wait)) != WAIT_TIMEOUT) {
     wait = 0;
+    signaled -= WAIT_OBJECT_0;
+    while ((signed)signaled < trunning) {
+      if (WaitForSingleObject(threads[signaled], wait) == WAIT_OBJECT_0) {
+	/* slice of thread */
+	CloseHandle(threads[signaled]);
+	memmove(threads + signaled + 0, threads + signaled + 1, sizeof(threads) - (signaled + 1) * sizeof(HANDLE));
 
-    /* slice of thread */
-    CloseHandle(threads[0]);
-    memmove(threads + 0, threads + 1, sizeof(threads) - sizeof(HANDLE));
+	/* and lower number of running threads */
+	trunning--;
 
-    /* and lower number of running threads */
-    trunning--;
-
-    /* and raise number of allowed threads */
-    ++tmax;
+	/* and raise number of allowed threads */
+	++tmax;
+      }
+      else
+	signaled++;
+    }
   }
-}
-
-void iodispatch(DWORD (__stdcall * _dispatchBase)(LPVOID lp), LPVOID _dispatchStruct) {
-  HANDLE th;
-
-  /* async */
-  if ((th = CreateThread(NULL, 0, _dispatchBase, _dispatchStruct, 0, NULL)) != INVALID_HANDLE_VALUE)
-    ioappend(th);
-  /* sync */
-  else
-    _dispatchBase(_dispatchStruct);
 }
 
 void ioflush() {
@@ -89,12 +92,32 @@ void ioflush() {
       threads[trunning] = NULL;
     }
   }
+
+  tmax = max(1, sysinfo.dwNumberOfProcessors);
+  trunning = 0;
 }
 
 void ioexit() {
   ioflush();
 
   DeleteCriticalSection(&cs);
+}
+
+void iodispatch(DWORD (__stdcall * _dispatchBase)(LPVOID lp), LPVOID _dispatchStruct) {
+  HANDLE th;
+
+  /* halt on abort */
+  if (rethrow) {
+    ioflush(); rethrow = false;
+    throw runtime_error(rethrowing);
+  }
+
+  /* async */
+  if ((th = CreateThread(NULL, 0, _dispatchBase, _dispatchStruct, 0, NULL)) != INVALID_HANDLE_VALUE)
+    ioappend(th);
+  /* sync */
+  else
+    _dispatchBase(_dispatchStruct);
 }
 #else
 TP_CALLBACK_ENVIRON te;
@@ -266,16 +289,20 @@ char *setsuf(char *result, const char *pathname, const char *suffix) {
 }
 
 char *putsuf(char *result, const char *pathname, const char *suffix) {
+  char extbak[1024];
   char *extp;
 
   if (result != pathname)
     strcpy(result, pathname);
   if ((extp = strrchr(result, '.')))
     *extp = '\0';
+  /* backup ext, as it may be erased by the suffix */
+  if (extp && extp[1])
+    strcpy(extbak, extp + 1);
   strcat(result, suffix);
   if (extp && extp[1]) {
     strcat(result, ".");
-    strcat(result, extp + 1);
+    strcat(result, extbak);
   }
 
   return result;
@@ -315,24 +342,17 @@ struct iofile {
 
 /* ------------------------------------------------------------ */
 
-int iotime(const char *pathname, struct ioinfo *info) {
-  if (!isarchive(pathname)) {
-    struct utimbuf otm;
-
-    otm.actime = time(NULL);
-    otm.modtime = info->io_time;
-
-    return utime(pathname, &otm);
-  }
-
-  return 0;
-}
-
 int iostat(const char *pathname, struct ioinfo *info) {
   struct stat sinfo;
   int ret;
 
   if (!isarchive(pathname)) {
+    DWORD atr = GetFileAttributes(pathname);
+    if (atr == INVALID_FILE_ATTRIBUTES)
+      return -1;
+    if ((atr & FILE_ATTRIBUTE_HIDDEN) && !processhidden)
+      return -1;
+
     if (!(ret = stat(pathname, &sinfo))) {
       if (sinfo.st_mode & S_IFDIR) {
         info->io_type = IO_DIRECTORY;
@@ -347,9 +367,23 @@ int iostat(const char *pathname, struct ioinfo *info) {
     }
   }
   else
+    /* archives return ctime, as mtime is skewed by BASH */
     ret = stat_arc(pathname, info);
 
   return ret;
+}
+
+int iotime(const char *pathname, struct ioinfo *info) {
+  if (!isarchive(pathname)) {
+    struct utimbuf otm;
+
+    otm.actime = time(NULL);
+    otm.modtime = info->io_time;
+
+    return utime(pathname, &otm);
+  }
+
+  return 0;
 }
 
 int iotime(const char *takename, const char *pathname) {
@@ -357,6 +391,24 @@ int iotime(const char *takename, const char *pathname) {
 
   if (!iostat(takename, &info))
     return iotime(pathname, &info);
+
+  return -1;
+}
+
+int iotime(const char *pathname) {
+  struct ioinfo info;
+
+  if (!iostat(pathname, &info))
+    return info.io_time;
+
+  return -1;
+}
+
+int iosize(const char *pathname) {
+  struct ioinfo info;
+
+  if (!iostat(pathname, &info))
+    return info.io_size;
 
   return -1;
 }
@@ -370,16 +422,35 @@ void iocp(const char *inname, const char *ouname) {
 
     if (infle && oufle) {
       void *mem = malloc(1024 * 1024);
-      size_t rd;
+      size_t rd, sz = 0;
 
       while ((rd = fread(mem, 1, 1024 * 1024, infle)) > 0) {
+	sz += rd;
         if (fwrite(mem, 1, rd, oufle) != rd) {
 	  fprintf(stderr, "disk full\n");
 	  exit(0);
         }
       }
 
+      if (sz == 0) {
+	struct ioinfo info;
+	if (iostat(inname, &info)) {
+	  fprintf(stderr, "unable to access \"%s\"\n", inname);
+	  exit(0);
+	}
+
+	if (info.io_size != 0) {
+	  fprintf(stderr, "unable to read from \"%s\"\n", inname);
+	//exit(0);
+	}
+      }
+
       free(mem);
+    }
+    else {
+      if (!infle) fprintf(stderr, "unable to open input  \"%s\"\n", inname);
+      if (!oufle) fprintf(stderr, "unable to open output \"%s\"\n", ouname);
+      exit(0);
     }
 
     if (infle) fclose(infle);
@@ -391,16 +462,35 @@ void iocp(const char *inname, const char *ouname) {
 
     if (infle && oufle) {
       void *mem = malloc(1024 * 1024);
-      size_t rd;
+      size_t rd, sz = 0;
 
       while ((rd = fread_arc(mem, 1, 1024 * 1024, infle)) > 0) {
+	sz += rd;
 	if (fwrite_arc(mem, 1, rd, oufle) != rd) {
 	  fprintf(stderr, "disk full\n");
 	  exit(0);
 	}
       }
 
+      if (sz == 0) {
+	struct ioinfo info;
+	if (iostat(inname, &info)) {
+	  fprintf(stderr, "unable to access \"%s\"\n", inname);
+	  exit(0);
+	}
+
+	if (info.io_size != 0) {
+	  fprintf(stderr, "unable to read from \"%s\"\n", inname);
+	//exit(0);
+	}
+      }
+
       free(mem);
+    }
+    else {
+      if (!infle) fprintf(stderr, "unable to open input  \"%s\"\n", inname);
+      if (!oufle) fprintf(stderr, "unable to open output \"%s\"\n", ouname);
+      exit(0);
     }
 
     if (infle) fclose_arc(infle);
@@ -412,16 +502,35 @@ void iocp(const char *inname, const char *ouname) {
 
     if (infle && oufle) {
       void *mem = malloc(1024 * 1024);
-      size_t rd;
+      size_t rd, sz = 0;
 
       while ((rd = fread_arc(mem, 1, 1024 * 1024, infle)) > 0) {
+	sz += rd;
 	if (fwrite(mem, 1, rd, oufle) != rd) {
 	  fprintf(stderr, "disk full\n");
 	  exit(0);
 	}
       }
 
+      if (sz == 0) {
+	struct ioinfo info;
+	if (iostat(inname, &info)) {
+	  fprintf(stderr, "unable to access \"%s\"\n", inname);
+	  exit(0);
+	}
+
+	if (info.io_size != 0) {
+	  fprintf(stderr, "unable to read from \"%s\"\n", inname);
+	//exit(0);
+	}
+      }
+
       free(mem);
+    }
+    else {
+      if (!infle) fprintf(stderr, "unable to open input  \"%s\"\n", inname);
+      if (!oufle) fprintf(stderr, "unable to open output \"%s\"\n", ouname);
+      exit(0);
     }
 
     if (infle) fclose_arc(infle);
@@ -433,16 +542,35 @@ void iocp(const char *inname, const char *ouname) {
 
     if (infle && oufle) {
       void *mem = malloc(1024 * 1024);
-      size_t rd;
+      size_t rd, sz = 0;
 
       while ((rd = fread(mem, 1, 1024 * 1024, infle)) > 0) {
+	sz += rd;
 	if (fwrite_arc(mem, 1, rd, oufle) != rd) {
 	  fprintf(stderr, "disk full\n");
 	  exit(0);
 	}
       }
 
+      if (sz == 0) {
+	struct ioinfo info;
+	if (iostat(inname, &info)) {
+	  fprintf(stderr, "unable to access \"%s\"\n", inname);
+	  exit(0);
+	}
+
+	if (info.io_size != 0) {
+	  fprintf(stderr, "unable to read from \"%s\"\n", inname);
+	//exit(0);
+	}
+      }
+
       free(mem);
+    }
+    else {
+      if (!infle) fprintf(stderr, "unable to open input  \"%s\"\n", inname);
+      if (!oufle) fprintf(stderr, "unable to open output \"%s\"\n", ouname);
+      exit(0);
     }
 
     if (infle) fclose    (infle);

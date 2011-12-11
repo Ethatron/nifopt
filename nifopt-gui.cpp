@@ -54,7 +54,7 @@ const COMDLG_FILTERSPEC c_rgLoadTypes[] =
     {L"All Model Documents (*.nif, *.kf)",      L"*.nif;*.kf"},
     {L"All Image Documents (*.dds, *.png, *.tga, *.bmp, *.ppm, *.pgm, *.pfm, *.hdr)",         	L"*.dds;*.png;*.tga;*.bmp;*.ppm;*.pgm;*.pfm;*.hdr"},
     {L"All Sound Documents (*.wav)",         	L"*.wav"},
-    {L"All Documents (*.*)",         		L"*.*"},
+    {L"All Documents (*)",         		L"*"},
 };
 
 COMDLG_FILTERSPEC c_rgSaveTypes[sizeof(c_rgLoadTypes) / sizeof(COMDLG_FILTERSPEC)];
@@ -390,8 +390,8 @@ HRESULT AskInput()
 		    // Obtain the result, once the user clicks the 'Open' button.
 		    // The result is an IShellItem object.
 		    IShellItem *psiResult;
-		    hr = pfd->GetResult(&psiResult);
-		    if (SUCCEEDED(hr))
+		    HRESULT hr2 = pfd->GetResult(&psiResult);
+		    if (SUCCEEDED(hr2))
 		    {
 		      // We are just going to print out the name of the file for sample sake.
 		      PWSTR pszFilePath = NULL;
@@ -489,17 +489,24 @@ HRESULT AskOutput()
 		  hr = pfd->Show(NULL);
 		  if (SUCCEEDED(hr))
 		  {
-#if 0
 		    // Obtain the result, once the user clicks the 'Open' button.
 		    // The result is an IShellItem object.
 		    IShellItem *psiResult;
-		    hr = pfd->GetResult(&psiResult);
-		    if (SUCCEEDED(hr))
+		    HRESULT hr2 = pfd->GetResult(&psiResult);
+		    if (SUCCEEDED(hr2))
 		    {
 		      // We are just going to print out the name of the file for sample sake.
 		      PWSTR pszFilePath = NULL;
 		      hr = psiResult->GetDisplayName(SIGDN_FILESYSPATH, &pszFilePath);
 		      if (SUCCEEDED(hr)) {
+			if (selected_string) {
+			  delete[] selected_string;
+			  selected_string = NULL;
+			}
+
+			selected_string = UnicodeToAnsi(pszFilePath);
+
+#if 0
 			TaskDialog(NULL,
 			  NULL,
 			  L"CommonFileDialogApp",
@@ -508,13 +515,13 @@ HRESULT AskOutput()
 			  TDCBF_OK_BUTTON,
 			  TD_INFORMATION_ICON,
 			  NULL);
+#endif
 
 			CoTaskMemFree(pszFilePath);
 		      }
 
 		      psiResult->Release();
 		    }
-#endif
 		  }
 		}
 	      }
@@ -539,7 +546,10 @@ HRESULT AskOutput()
 
 extern bool geotoprimitive;
 extern bool stripstolists;
+extern bool optimizefar;
 extern bool optimizehavok;
+extern bool optimizesmmopp;
+extern bool optimizemmmopp;
 extern bool optimizelists;
 extern bool optimizeparts;
 extern bool optimizekeys;
@@ -575,15 +585,21 @@ extern bool compressbsa;
 extern bool srchbestbsa;
 extern bool thresholdbsa;
 
+extern int gameversion;
+
 HRESULT parse_inifile(const char *ini, const char *section) {
   geotoprimitive  = !!GetPrivateProfileInt(section, "havokgeotoprim", geotoprimitive, ini);
   stripstolists   = !!GetPrivateProfileInt(section, "stripstolists", stripstolists, ini);
+  optimizefar     = !!GetPrivateProfileInt(section, "optimizefar", optimizefar, ini);
   optimizelists   = !!GetPrivateProfileInt(section, "optimizelists", optimizelists, ini);
   optimizeparts   = !!GetPrivateProfileInt(section, "optimizeparts", optimizeparts, ini);
   optimizekeys    = !!GetPrivateProfileInt(section, "optimizekeys", optimizekeys, ini);
   optimizehavok   = !!GetPrivateProfileInt(section, "optimizehavok", optimizehavok, ini);
+  optimizesmmopp  = !!GetPrivateProfileInt(section, "optimizesmmopp", optimizesmmopp, ini);
+  optimizemmmopp  = !!GetPrivateProfileInt(section, "optimizemmmopp", optimizemmmopp, ini);
   optimizequick   = !!GetPrivateProfileInt(section, "optimizequick", optimizequick, ini);
   optimizetexts   = !!GetPrivateProfileInt(section, "optimizetexts", optimizetexts, ini);
+  barestripfar    = !!GetPrivateProfileInt(section, "barestripfar", barestripfar, ini);
   parallaxmapping = !!GetPrivateProfileInt(section, "parallaxmapping", parallaxmapping, ini);
   texturepaths    =  !GetPrivateProfileInt(section, "leavetexpaths", texturepaths, ini);
   leavehdrtexts   = !!GetPrivateProfileInt(section, "leavehdrtexts", leavehdrtexts, ini);
@@ -606,6 +622,7 @@ HRESULT parse_inifile(const char *ini, const char *section) {
   compresssounds  = !!GetPrivateProfileInt(section, "compresssounds", compresssounds, ini);
   compresslevel   =   GetPrivateProfileInt(section, "compress", compresslevel, ini);
   simulation      = !!GetPrivateProfileInt(section, "simulate", simulation, ini);
+  gameversion     =   GetPrivateProfileInt(section, "gameversion", gameversion, ini);
 
   if (compresslevel < 0)
     compresslevel = -compresslevel, thresholdbsa = false;
@@ -619,6 +636,9 @@ HRESULT parse_inifile(const char *ini, const char *section) {
 
 #include <sys/stat.h>
 
+extern char *infile;
+extern char *outfile;
+
 extern char *getext(char *result, const char *pathname);
 extern void prolog();
 extern void epilog();
@@ -631,33 +651,33 @@ HRESULT Deployment()
 
   hr = AskInput();
   if (SUCCEEDED(hr)) {
-    /* look what we'v got */
-    char *infile, *outfile;
+    /* look what we'v got
+    char *infile, *outfile; */
     struct stat sinfo; char ext[256], *extp;
     stat(selected_string, &sinfo);
     extp = getext(ext, selected_string);
     infile = strdup(selected_string);
     defext = AnsiToUnicode(extp);
 
-				   c_rgSaveTypes[0] = c_rgLoadTypes[0], c_rgSaveNums = 1, defidx = 1;
-    /**/ if (!stricmp("nif", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[1], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("kf",  ext)) c_rgSaveTypes[1] = c_rgLoadTypes[2], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("dds", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("png", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("tga", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("bmp", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("ppm", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("pgm", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("pfm", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("hdr", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("wav", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[11], c_rgSaveNums++, defidx = 2;
-    else                           c_rgSaveTypes[1] = c_rgLoadTypes[16], c_rgSaveNums++, defidx = 2;
+				    c_rgSaveTypes[0] = c_rgLoadTypes[0], c_rgSaveNums = 1, defidx = 1;
+    /**/ if (!stricmp("nif", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[1], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("kf",  extp)) c_rgSaveTypes[1] = c_rgLoadTypes[2], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("dds", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("png", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("tga", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("bmp", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("ppm", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("pgm", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("pfm", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("hdr", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("wav", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[11], c_rgSaveNums++, defidx = 2;
+    else                            c_rgSaveTypes[1] = c_rgLoadTypes[16], c_rgSaveNums++, defidx = 2;
 
     hr = AskOutput();
     if (SUCCEEDED(hr)) {
       outfile = strdup(selected_string);
 
-      parse_inifile("nifopt.ini", "Deployment");
+      parse_inifile("./nifopt.ini", "Deployment");
       prolog();
 
 #ifdef	NDEBUG
@@ -696,33 +716,33 @@ HRESULT Repair()
 
   hr = AskInput();
   if (SUCCEEDED(hr)) {
-    /* look what we'v got */
-    char *infile, *outfile;
+    /* look what we'v got
+    char *infile, *outfile; */
     struct stat sinfo; char ext[256], *extp;
     stat(selected_string, &sinfo);
     extp = getext(ext, selected_string);
     infile = strdup(selected_string);
     defext = AnsiToUnicode(extp);
 
-				   c_rgSaveTypes[0] = c_rgLoadTypes[0], c_rgSaveNums = 1, defidx = 1;
-    /**/ if (!stricmp("nif", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[1], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("kf",  ext)) c_rgSaveTypes[1] = c_rgLoadTypes[2], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("dds", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("png", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[4], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("tga", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[5], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("bmp", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[6], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("ppm", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[7], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("pgm", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[8], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("pfm", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[9], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("hdr", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[10], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("wav", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[11], c_rgSaveNums++, defidx = 2;
-    else                           c_rgSaveTypes[1] = c_rgLoadTypes[16], c_rgSaveNums++, defidx = 2;
+				    c_rgSaveTypes[0] = c_rgLoadTypes[0], c_rgSaveNums = 1, defidx = 1;
+    /**/ if (!stricmp("nif", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[1], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("kf",  extp)) c_rgSaveTypes[1] = c_rgLoadTypes[2], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("dds", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("png", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[4], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("tga", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[5], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("bmp", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[6], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("ppm", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[7], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("pgm", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[8], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("pfm", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[9], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("hdr", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[10], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("wav", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[11], c_rgSaveNums++, defidx = 2;
+    else                            c_rgSaveTypes[1] = c_rgLoadTypes[16], c_rgSaveNums++, defidx = 2;
 
     hr = AskOutput();
     if (SUCCEEDED(hr)) {
       outfile = strdup(selected_string);
 
-      parse_inifile("nifopt.ini", "Repair");
+      parse_inifile("./nifopt.ini", "Repair");
       prolog();
 
 #ifdef	NDEBUG
@@ -761,33 +781,33 @@ HRESULT Copy()
 
   hr = AskInput();
   if (SUCCEEDED(hr)) {
-    /* look what we'v got */
-    char *infile, *outfile;
+    /* look what we'v got
+    char *infile, *outfile; */
     struct stat sinfo; char ext[256], *extp;
     stat(selected_string, &sinfo);
     extp = getext(ext, selected_string);
     infile = strdup(selected_string);
     defext = AnsiToUnicode(extp);
 
-				   c_rgSaveTypes[0] = c_rgLoadTypes[0], c_rgSaveNums = 1, defidx = 1;
-    /**/ if (!stricmp("nif", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[1], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("kf",  ext)) c_rgSaveTypes[1] = c_rgLoadTypes[2], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("dds", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("png", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[4], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("tga", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[5], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("bmp", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[6], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("ppm", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[7], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("pgm", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[8], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("pfm", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[9], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("hdr", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[10], c_rgSaveNums++, defidx = 2;
-    else if (!stricmp("wav", ext)) c_rgSaveTypes[1] = c_rgLoadTypes[11], c_rgSaveNums++, defidx = 2;
-    else                           c_rgSaveTypes[1] = c_rgLoadTypes[16], c_rgSaveNums++, defidx = 2;
+				    c_rgSaveTypes[0] = c_rgLoadTypes[0], c_rgSaveNums = 1, defidx = 1;
+    /**/ if (!stricmp("nif", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[1], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("kf",  extp)) c_rgSaveTypes[1] = c_rgLoadTypes[2], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("dds", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[3], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("png", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[4], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("tga", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[5], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("bmp", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[6], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("ppm", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[7], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("pgm", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[8], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("pfm", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[9], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("hdr", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[10], c_rgSaveNums++, defidx = 2;
+    else if (!stricmp("wav", extp)) c_rgSaveTypes[1] = c_rgLoadTypes[11], c_rgSaveNums++, defidx = 2;
+    else                            c_rgSaveTypes[1] = c_rgLoadTypes[16], c_rgSaveNums++, defidx = 2;
 
     hr = AskOutput();
     if (SUCCEEDED(hr)) {
       outfile = strdup(selected_string);
 
-      parse_inifile("nifopt.ini", "Copy");
+      parse_inifile("./nifopt.ini", "Copy");
       prolog();
 
 #ifdef	NDEBUG
